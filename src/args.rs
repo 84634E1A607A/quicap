@@ -35,6 +35,18 @@ pub struct Config {
     pub target_ip: Ipv4Addr,
     
     /// Target server port for client
-    #[arg(long, default_value = "4434")]
+    #[arg(long, default_value = "4433")]
     pub target_port: u16,
+    
+    /// Path to server certificate file
+    #[arg(long, default_value = "certs/server.crt")]
+    pub cert_file: String,
+    
+    /// Path to server private key file
+    #[arg(long, default_value = "certs/server.key")]
+    pub key_file: String,
+    
+    /// Path to CA certificate file for client trust verification
+    #[arg(long, default_value = "certs/ca.crt")]
+    pub ca_cert: Option<String>,
 }

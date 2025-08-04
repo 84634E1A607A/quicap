@@ -9,29 +9,28 @@ use tokio::time;
 pub struct QuicServer {
     socket: Arc<UdpSocket>,
     config: quiche::Config,
-    connections: HashMap<quiche::ConnectionId<'static>, quiche::Connection>,
-    conn_id_seed: u64,
+    connections: HashMap<SocketAddr, quiche::Connection>,
 }
 
 impl QuicServer {
-    pub async fn new(listen_addr: SocketAddr) -> std::io::Result<Self> {
+    pub async fn new(listen_addr: SocketAddr, cert_file: &str, key_file: &str) -> std::io::Result<Self> {
         let socket = UdpSocket::bind(listen_addr).await?;
-        info!("QUIC server listening on {}", listen_addr);
+        info!("[SERVER] QUIC server listening on {}", listen_addr);
 
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         
         // Server configuration - try to load certificates
-        if let Err(e) = config.load_cert_chain_from_pem_file("certs/server.crt") {
-            warn!("Could not load certs/server.crt: {}", e);
+        if let Err(e) = config.load_cert_chain_from_pem_file(cert_file) {
+            warn!("[SERVER] Could not load {}: {}", cert_file, e);
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound, 
-                "Server certificate not found. Please ensure certs/server.crt exists."));
+                format!("Server certificate not found. Please ensure {} exists.", cert_file)));
         }
         
-        if let Err(e) = config.load_priv_key_from_pem_file("certs/server.key") {
-            warn!("Could not load certs/server.key: {}", e);
+        if let Err(e) = config.load_priv_key_from_pem_file(key_file) {
+            warn!("[SERVER] Could not load {}: {}", key_file, e);
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound, 
-                "Server private key not found. Please ensure certs/server.key exists."));
+                format!("Server private key not found. Please ensure {} exists.", key_file)));
         }
 
         config.set_application_protos(&[b"quicap"])
@@ -51,7 +50,6 @@ impl QuicServer {
             socket: Arc::new(socket),
             config,
             connections: HashMap::new(),
-            conn_id_seed: 0,
         })
     }
 
@@ -68,7 +66,7 @@ impl QuicServer {
                             self.handle_packet(&mut buf[..len], from, &mut out_buf).await?;
                         }
                         Err(e) => {
-                            error!("Error receiving packet: {}", e);
+                            error!("[SERVER] Error receiving packet: {}", e);
                         }
                     }
                 }
@@ -85,23 +83,24 @@ impl QuicServer {
         let hdr = match quiche::Header::from_slice(packet, quiche::MAX_CONN_ID_LEN) {
             Ok(hdr) => hdr,
             Err(e) => {
-                debug!("Invalid packet header from {}: {}", from, e);
+                debug!("[SERVER] Invalid packet header from {}: {}", from, e);
                 return Ok(());
             }
         };
 
-        let conn_id = hdr.dcid.clone().into_owned();
-
-        if !self.connections.contains_key(&conn_id) {
+        // Check if we have an existing connection for this address
+        if !self.connections.contains_key(&from) {
+            // Only create new connections for Initial packets
             if hdr.ty != quiche::Type::Initial {
-                debug!("Non-initial packet for unknown connection from {}", from);
+                debug!("[SERVER] Non-initial packet for unknown connection from {}", from);
                 return Ok(());
             }
 
+            // Create new connection for initial packet
             let mut scid = [0; quiche::MAX_CONN_ID_LEN];
             let scid_len = 16;
-            self.conn_id_seed += 1;
-            scid[..8].copy_from_slice(&self.conn_id_seed.to_be_bytes());
+            // Generate a random SCID instead of using a predictable counter
+            scid[..scid_len].iter_mut().for_each(|b| *b = rand::random::<u8>());
             let scid = quiche::ConnectionId::from_ref(&scid[..scid_len]);
             
             let odcid = if !hdr.dcid.is_empty() {
@@ -114,16 +113,16 @@ impl QuicServer {
             let conn = match quiche::accept(&scid, odcid, local_addr, from, &mut self.config) {
                 Ok(conn) => conn,
                 Err(e) => {
-                    error!("Failed to accept connection from {}: {}", from, e);
+                    error!("[SERVER] Failed to accept connection from {}: {}", from, e);
                     return Ok(());
                 }
             };
 
-            info!("New QUIC connection from {}", from);
-            self.connections.insert(conn_id.clone(), conn);
+            info!("[SERVER] New QUIC connection from {}", from);
+            self.connections.insert(from, conn);
         }
 
-        let conn = self.connections.get_mut(&conn_id).unwrap();
+        let conn = self.connections.get_mut(&from).unwrap();
 
         let recv_info = quiche::RecvInfo { 
             to: self.socket.local_addr()?,
@@ -132,13 +131,13 @@ impl QuicServer {
         
         match conn.recv(packet, recv_info) {
             Ok(_) => {
-                debug!("Processed packet from {}", from);
+                debug!("[SERVER] Processed packet from {}", from);
             }
             Err(quiche::Error::Done) => {
-                debug!("No more data to process from {}", from);
+                debug!("[SERVER] No more data to process from {}", from);
             }
             Err(e) => {
-                error!("Error processing packet from {}: {}", from, e);
+                error!("[SERVER] Error processing packet from {}: {}", from, e);
                 return Ok(());
             }
         }
@@ -148,23 +147,23 @@ impl QuicServer {
         loop {
             match conn.dgram_recv(&mut dgram_buf) {
                 Ok(len) => {
-                    info!("📨 Received DATAGRAM from {}: {} bytes", from, len);
+                    info!("[SERVER] 📨 Received DATAGRAM from {}: {} bytes", from, len);
                     print_datagram_hex(&dgram_buf[..len]);
                     
                     // Send ping response
                     let ping_data = b"PONG from server";
                     match conn.dgram_send(ping_data) {
                         Ok(_) => {
-                            info!("🏓 Sent PONG datagram to {}", from);
+                            info!("[SERVER] 🏓 Sent PONG datagram to {}", from);
                         }
                         Err(e) => {
-                            error!("Failed to send PONG datagram: {}", e);
+                            error!("[SERVER] Failed to send PONG datagram: {}", e);
                         }
                     }
                 }
                 Err(quiche::Error::Done) => break,
                 Err(e) => {
-                    error!("Error receiving datagram: {}", e);
+                    error!("[SERVER] Error receiving datagram: {}", e);
                     break;
                 }
             }
@@ -176,13 +175,13 @@ impl QuicServer {
                 Ok(v) => v,
                 Err(quiche::Error::Done) => break,
                 Err(e) => {
-                    error!("Error sending packet: {}", e);
+                    error!("[SERVER] Error sending packet: {}", e);
                     break;
                 }
             };
 
             if let Err(e) = self.socket.send_to(&out_buf[..written], send_info.to).await {
-                error!("Error sending UDP packet to {}: {}", send_info.to, e);
+                error!("[SERVER] Error sending UDP packet to {}: {}", send_info.to, e);
             }
         }
 
@@ -192,11 +191,14 @@ impl QuicServer {
     async fn handle_timeouts(&mut self, out_buf: &mut [u8; 1500]) -> std::io::Result<()> {
         let mut to_remove = Vec::new();
 
-        for (conn_id, conn) in &mut self.connections {
-            conn.on_timeout();
+        for (&addr, conn) in &mut self.connections {
+            // Only call on_timeout if there's actually a timeout to handle
+            if let Some(_timeout) = conn.timeout() {
+                conn.on_timeout();
+            }
 
             if conn.is_closed() {
-                to_remove.push(conn_id.clone());
+                to_remove.push(addr);
                 continue;
             }
 
@@ -206,20 +208,20 @@ impl QuicServer {
                     Ok(v) => v,
                     Err(quiche::Error::Done) => break,
                     Err(e) => {
-                        error!("Error sending timeout packet: {}", e);
+                        error!("[SERVER] Error sending timeout packet: {}", e);
                         break;
                     }
                 };
 
                 if let Err(e) = self.socket.send_to(&out_buf[..written], send_info.to).await {
-                    error!("Error sending timeout UDP packet: {}", e);
+                    error!("[SERVER] Error sending timeout UDP packet: {}", e);
                 }
             }
         }
 
-        for conn_id in to_remove {
-            info!("Removing closed connection");
-            self.connections.remove(&conn_id);
+        for addr in to_remove {
+            info!("[SERVER] Removing closed connection from {}", addr);
+            self.connections.remove(&addr);
         }
 
         Ok(())
@@ -230,10 +232,11 @@ pub struct QuicClient {
     socket: Arc<UdpSocket>,
     connection: quiche::Connection,
     server_addr: SocketAddr,
+    connection_established_logged: bool,
 }
 
 impl QuicClient {
-    pub async fn new(server_addr: SocketAddr) -> std::io::Result<Self> {
+    pub async fn new(server_addr: SocketAddr, ca_cert: Option<&str>) -> std::io::Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         info!("QUIC client connecting to {}", server_addr);
 
@@ -250,8 +253,21 @@ impl QuicClient {
         config.set_initial_max_streams_bidi(100);
         config.set_initial_max_streams_uni(100);
         config.set_disable_active_migration(true);
-        config.enable_dgram(true, 1000, 1000);
-        config.verify_peer(false); // Allow cert errors for now
+        config.enable_dgram(true, 6000, 6000);
+        
+        // Configure certificate verification
+        if let Some(ca_path) = ca_cert {
+            if let Err(e) = config.load_verify_locations_from_file(ca_path) {
+                warn!("Could not load CA certificate from {}: {}", ca_path, e);
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, 
+                    format!("CA certificate not found. Please ensure {} exists.", ca_path)));
+            }
+            config.verify_peer(true);
+            info!("Using CA certificate from {} for peer verification", ca_path);
+        } else {
+            config.verify_peer(false); // Allow cert errors when no CA is specified
+            warn!("No CA certificate specified, disabling peer verification");
+        }
 
         let mut scid = [0; quiche::MAX_CONN_ID_LEN];
         let scid_len = 16;
@@ -266,6 +282,7 @@ impl QuicClient {
             socket: Arc::new(socket),
             connection,
             server_addr,
+            connection_established_logged: false,
         })
     }
 
@@ -278,6 +295,10 @@ impl QuicClient {
         self.send_initial_packets(&mut out_buf).await?;
 
         loop {
+            // Get the next timeout from the connection, or use a default
+            let timeout_duration = self.connection.timeout()
+                .unwrap_or(Duration::from_millis(25));
+
             tokio::select! {
                 // Handle incoming packets
                 result = self.socket.recv_from(&mut buf) => {
@@ -301,7 +322,7 @@ impl QuicClient {
                 }
 
                 // Handle connection timeouts
-                _ = time::sleep(Duration::from_millis(100)) => {
+                _ = time::sleep(timeout_duration) => {
                     self.handle_timeout(&mut out_buf).await?;
                 }
             }
@@ -350,8 +371,9 @@ impl QuicClient {
             }
         }
 
-        if self.connection.is_established() && !self.connection.is_closed() {
+        if self.connection.is_established() && !self.connection_established_logged {
             info!("🎉 QUIC connection established!");
+            self.connection_established_logged = true;
         }
 
         // Check for datagrams
@@ -392,6 +414,21 @@ impl QuicClient {
         match self.connection.dgram_send(ping_data) {
             Ok(_) => {
                 info!("🏓 Sent PING datagram to server");
+                
+                // Actually send the packets containing the datagram
+                let mut out_buf = [0; 1500];
+                loop {
+                    let (written, send_info) = match self.connection.send(&mut out_buf) {
+                        Ok(v) => v,
+                        Err(quiche::Error::Done) => break,
+                        Err(e) => {
+                            error!("Error sending datagram packet: {}", e);
+                            break;
+                        }
+                    };
+
+                    self.socket.send_to(&out_buf[..written], send_info.to).await?;
+                }
             }
             Err(e) => {
                 error!("Failed to send PING datagram: {}", e);
@@ -401,20 +438,23 @@ impl QuicClient {
     }
 
     async fn handle_timeout(&mut self, out_buf: &mut [u8; 1500]) -> std::io::Result<()> {
-        self.connection.on_timeout();
+        // Only call on_timeout if there's actually a timeout to handle
+        if let Some(_timeout) = self.connection.timeout() {
+            self.connection.on_timeout();
 
-        // Send any pending packets
-        loop {
-            let (written, send_info) = match self.connection.send(out_buf) {
-                Ok(v) => v,
-                Err(quiche::Error::Done) => break,
-                Err(e) => {
-                    error!("Error sending timeout packet: {}", e);
-                    break;
-                }
-            };
+            // Send any pending packets
+            loop {
+                let (written, send_info) = match self.connection.send(out_buf) {
+                    Ok(v) => v,
+                    Err(quiche::Error::Done) => break,
+                    Err(e) => {
+                        error!("Error sending timeout packet: {}", e);
+                        break;
+                    }
+                };
 
-            self.socket.send_to(&out_buf[..written], send_info.to).await?;
+                self.socket.send_to(&out_buf[..written], send_info.to).await?;
+            }
         }
 
         Ok(())

@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Start server in background
     let server_task = {
-        let mut server = QuicServer::new(listen_addr).await?;
+        let mut server = QuicServer::new(listen_addr, &config.cert_file, &config.key_file).await?;
         tokio::spawn(async move {
             if let Err(e) = server.run().await {
                 error!("Server error: {}", e);
@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Start client in background
     let client_task = {
-        let mut client = QuicClient::new(target_addr).await?;
+        let mut client = QuicClient::new(target_addr, config.ca_cert.as_deref()).await?;
         tokio::spawn(async move {
             if let Err(e) = client.run().await {
                 error!("Client error: {}", e);
