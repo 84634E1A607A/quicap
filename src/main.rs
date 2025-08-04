@@ -12,8 +12,14 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Use env_logger for logging at DEBUG
+    #[cfg(debug_assertions)]
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Debug)
+        .init();
+
+    #[cfg(not(debug_assertions))]
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Warn)
         .init();
     
     let config = Config::parse();
@@ -80,10 +86,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_task = if !config.server_only {
         let target_addr_clone = target_addr;
         let ca_cert_clone = config.ca_cert.clone();
-        let client_cert_clone = config.client_cert.clone();
-        let client_key_clone = config.client_key.clone();
+        let client_cert_clone = config.cert_file.clone();
+        let client_key_clone = config.key_file.clone();
         let conn_id_len = config.conn_id_len;
         let tun_injector_clone = tun_injector.clone();
+        let max_retry_delay = Duration::from_secs(config.max_retry_delay);
         let auto_retry = config.no_client_auto_retry;
         let max_retries = config.client_max_retries;
         
@@ -94,7 +101,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             loop {
                 // Create a new client instance for each attempt
-                match QuicClient::new(target_addr_clone, ca_cert_clone.as_deref(), client_cert_clone.as_deref(), client_key_clone.as_deref(), conn_id_len).await {
+                match QuicClient::new(
+                    target_addr_clone,
+                    ca_cert_clone.as_deref(),
+                    Some(client_cert_clone.as_str()),
+                    Some(client_key_clone.as_str()),
+                    conn_id_len
+                ).await {
                     Ok(mut client) => {
                         client.set_tun_injector(tun_injector_clone.clone());
                         if let Some(rx) = packet_rx.take() {
@@ -125,8 +138,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 warn!("🔄 Client connection failed (attempt {}), retrying in {:?}...", retry_count, retry_delay);
                                 tokio::time::sleep(retry_delay).await;
                                 
-                                // Exponential backoff with jitter, max 30 seconds
-                                retry_delay = std::cmp::min(retry_delay * 2, Duration::from_secs(30));
+                                // Exponential backoff with jitter, max MAX_RETRY_DELAY
+                                retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
                             }
                             Ok(_) => {
                                 // Client exited normally (connection closed gracefully)
@@ -140,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     
                                     tokio::time::sleep(retry_delay).await;
-                                    retry_delay = std::cmp::min(retry_delay * 2, Duration::from_secs(30));
+                                    retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
                                 } else {
                                     break;
                                 }
@@ -163,7 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         
                         warn!("🔄 Client creation failed (attempt {}), retrying in {:?}...", retry_count, retry_delay);
                         tokio::time::sleep(retry_delay).await;
-                        retry_delay = std::cmp::min(retry_delay * 2, Duration::from_secs(30));
+                        retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
                     }
                 }
             }

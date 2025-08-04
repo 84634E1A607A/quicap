@@ -56,8 +56,8 @@ impl QuicServer {
         }
         
         config.set_max_idle_timeout(30000);
-        config.set_max_recv_udp_payload_size(1350);
-        config.set_max_send_udp_payload_size(1350);
+        config.set_max_recv_udp_payload_size(1400);
+        config.set_max_send_udp_payload_size(1400);
         config.set_initial_max_data(10_000_000);
         config.set_initial_max_stream_data_bidi_local(1_000_000);
         config.set_initial_max_stream_data_bidi_remote(1_000_000);
@@ -343,8 +343,8 @@ impl QuicClient {
         config.set_application_protos(&[b"quicap"])
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         config.set_max_idle_timeout(30000);
-        config.set_max_recv_udp_payload_size(1350);
-        config.set_max_send_udp_payload_size(1350);
+        config.set_max_recv_udp_payload_size(1400);
+        config.set_max_send_udp_payload_size(1400);
         config.set_initial_max_data(10_000_000);
         config.set_initial_max_stream_data_bidi_local(1_000_000);
         config.set_initial_max_stream_data_bidi_remote(1_000_000);

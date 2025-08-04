@@ -19,6 +19,7 @@ impl TunDevice {
             .name(name)
             .address(ip)
             .netmask(netmask)
+            .mtu(1400)
             .up()
             .build()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;

@@ -34,25 +34,17 @@ pub struct Config {
     #[arg(long, default_value = "4433")]
     pub target_port: u16,
     
-    /// Path to server certificate file
+    /// Path to certificate file (used for both client and server)
     #[arg(long, default_value = "certs/server.crt")]
     pub cert_file: String,
-    
-    /// Path to server private key file
+
+    /// Path to private key file (used for both client and server)
     #[arg(long, default_value = "certs/server.key")]
     pub key_file: String,
-    
+
     /// Path to CA certificate file for client trust verification
     #[arg(long, default_value = "certs/ca.crt")]
     pub ca_cert: Option<String>,
-    
-    /// Path to client certificate file for mutual TLS
-    #[arg(long, default_value = "certs/client.crt")]
-    pub client_cert: Option<String>,
-    
-    /// Path to client private key file for mutual TLS
-    #[arg(long, default_value = "certs/client.key")]
-    pub client_key: Option<String>,
     
     /// Connection ID length (4-20 bytes)
     #[arg(long, default_value = "16", value_parser = validate_conn_id_len)]
@@ -61,7 +53,7 @@ pub struct Config {
     /// Disable QUIC client mode (server only)
     #[arg(long)]
     pub server_only: bool,
-    
+
     /// Disable auto-retry for client connections (auto-retry is enabled by default)
     #[arg(long, action = clap::ArgAction::SetFalse)]
     pub no_client_auto_retry: bool,
@@ -69,6 +61,10 @@ pub struct Config {
     /// Maximum retry attempts for client connections (0 = infinite)
     #[arg(long, default_value = "0")]
     pub client_max_retries: u32,
+
+    /// Maximum retry delay in seconds (default: 10 seconds)
+    #[arg(long, default_value = "10")]
+    pub max_retry_delay: u64,
 }
 
 fn validate_conn_id_len(s: &str) -> Result<u8, String> {
