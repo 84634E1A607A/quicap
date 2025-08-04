@@ -14,6 +14,7 @@ pub struct QuicServer {
     conn_id_len: u8,
     tun_injector: Option<Sender<Vec<u8>>>,
     packet_rx: Option<Receiver<Vec<u8>>>,
+    last_activity: HashMap<SocketAddr, std::time::Instant>,
 }
 
 impl QuicServer {
@@ -72,6 +73,7 @@ impl QuicServer {
             conn_id_len,
             tun_injector: None,
             packet_rx: None,
+            last_activity: HashMap::new(),
         })
     }
 
@@ -131,6 +133,9 @@ impl QuicServer {
                 return Ok(());
             }
         };
+
+        // Update activity timestamp for this connection
+        self.last_activity.insert(from, std::time::Instant::now());
 
         // Check if we have an existing connection for this address
         if let std::collections::hash_map::Entry::Vacant(entry) = self.connections.entry(from) {
@@ -238,6 +243,7 @@ impl QuicServer {
 
     async fn handle_timeouts(&mut self, out_buf: &mut [u8; 1500]) -> std::io::Result<()> {
         let mut to_remove = Vec::new();
+        let keep_alive_interval = Duration::from_secs(10); // Send PING every 10 seconds if idle
 
         for (&addr, conn) in &mut self.connections {
             // Only call on_timeout if there's actually a timeout to handle
@@ -248,6 +254,18 @@ impl QuicServer {
             if conn.is_closed() {
                 to_remove.push(addr);
                 continue;
+            }
+
+            // Send keep-alive PING if connection is established and has been idle
+            if conn.is_established() {
+                if let Some(last_activity) = self.last_activity.get(&addr) {
+                    if last_activity.elapsed() >= keep_alive_interval && conn.send_ack_eliciting().is_ok() {
+                        debug!("[SERVER] 🏓 Sent keep-alive PING frame to {} after {} seconds of inactivity", 
+                               addr, last_activity.elapsed().as_secs());
+                        // Update activity time to prevent immediate resending
+                        self.last_activity.insert(addr, std::time::Instant::now());
+                    }
+                }
             }
 
             // Send any pending packets
@@ -270,6 +288,7 @@ impl QuicServer {
         for addr in to_remove {
             info!("[SERVER] Removing closed connection from {}", addr);
             self.connections.remove(&addr);
+            self.last_activity.remove(&addr);
         }
 
         Ok(())
@@ -285,6 +304,9 @@ impl QuicServer {
                     Ok(_) => {
                         info!("[SERVER] 📤 Forwarded {} bytes via DATAGRAM to {}", packet.len(), addr);
                         sent_any = true;
+                        
+                        // Update activity timestamp since we're sending data
+                        self.last_activity.insert(addr, std::time::Instant::now());
                         
                         // Send any resulting packets
                         loop {
@@ -413,6 +435,8 @@ impl QuicClient {
         let mut buf = [0; 1500];
         let mut out_buf = [0; 1500];
         let mut packet_rx = self.packet_rx.take();
+        let mut last_activity = std::time::Instant::now();
+        let keep_alive_interval = Duration::from_secs(10); // Send PING every 10 seconds if idle
 
         // Initial handshake
         self.send_initial_packets(&mut out_buf).await?;
@@ -428,6 +452,7 @@ impl QuicClient {
                     match result {
                         Ok((len, from)) => {
                             if from == self.server_addr {
+                                last_activity = std::time::Instant::now();
                                 self.handle_packet(&mut buf[..len], &mut out_buf).await?;
                             }
                         }
@@ -446,13 +471,22 @@ impl QuicClient {
                 } => {
                     if let Some(tun_packet) = packet {
                         debug!("[CLIENT] Received {} bytes from TUN device to forward", tun_packet.len());
+                        last_activity = std::time::Instant::now();
                         self.forward_tun_packet_via_datagram(&tun_packet, &mut out_buf).await?;
                     }
                 }
 
-                // Handle connection timeouts
+                // Handle connection timeouts and keep-alive pings
                 _ = time::sleep(timeout_duration) => {
                     self.handle_timeout(&mut out_buf).await?;
+                    
+                    // Send keep-alive PING if we've been idle too long
+                    if self.connection.is_established() && last_activity.elapsed() >= keep_alive_interval {
+                        debug!("[CLIENT] Sending keep-alive PING after {} seconds of inactivity", 
+                               last_activity.elapsed().as_secs());
+                        self.send_ping_frame(&mut out_buf).await?;
+                        last_activity = std::time::Instant::now();
+                    }
                 }
             }
 
@@ -553,20 +587,18 @@ impl QuicClient {
         Ok(())
     }
 
-    async fn send_ping_datagram(&mut self) -> std::io::Result<()> {
-        let ping_data = b"PING from client";
-        match self.connection.dgram_send(ping_data) {
+    async fn send_ping_frame(&mut self, out_buf: &mut [u8; 1500]) -> std::io::Result<()> {
+        match self.connection.send_ack_eliciting() {
             Ok(_) => {
-                info!("🏓 Sent PING datagram to server");
+                info!("🏓 Sent PING frame to server");
                 
-                // Actually send the packets containing the datagram
-                let mut out_buf = [0; 1500];
+                // Send any resulting packets containing the PING frame
                 loop {
-                    let (written, send_info) = match self.connection.send(&mut out_buf) {
+                    let (written, send_info) = match self.connection.send(out_buf) {
                         Ok(v) => v,
                         Err(quiche::Error::Done) => break,
                         Err(e) => {
-                            error!("Error sending datagram packet: {}", e);
+                            error!("Error sending PING packet: {}", e);
                             break;
                         }
                     };
@@ -575,7 +607,7 @@ impl QuicClient {
                 }
             }
             Err(e) => {
-                error!("Failed to send PING datagram: {}", e);
+                debug!("Failed to send PING frame: {}", e);
             }
         }
         Ok(())
