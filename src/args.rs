@@ -61,6 +61,14 @@ pub struct Config {
     /// Disable QUIC client mode (server only)
     #[arg(long)]
     pub server_only: bool,
+    
+    /// Disable auto-retry for client connections (auto-retry is enabled by default)
+    #[arg(long, action = clap::ArgAction::SetFalse)]
+    pub no_client_auto_retry: bool,
+
+    /// Maximum retry attempts for client connections (0 = infinite)
+    #[arg(long, default_value = "0")]
+    pub client_max_retries: u32,
 }
 
 fn validate_conn_id_len(s: &str) -> Result<u8, String> {

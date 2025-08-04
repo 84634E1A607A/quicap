@@ -6,7 +6,8 @@ use args::Config;
 use tun_device::TunDevice;
 use quic::{QuicServer, QuicClient};
 use clap::Parser;
-use log::{info, debug, error};
+use log::{info, debug, error, warn};
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,12 +78,94 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Start client in background (only if not server-only mode)
     let client_task = if !config.server_only {
-        let mut client = QuicClient::new(target_addr, config.ca_cert.as_deref(), config.client_cert.as_deref(), config.client_key.as_deref(), config.conn_id_len).await?;
-        client.set_tun_injector(tun_injector.clone());
-        client.set_packet_receiver(client_rx_rx);
+        let target_addr_clone = target_addr;
+        let ca_cert_clone = config.ca_cert.clone();
+        let client_cert_clone = config.client_cert.clone();
+        let client_key_clone = config.client_key.clone();
+        let conn_id_len = config.conn_id_len;
+        let tun_injector_clone = tun_injector.clone();
+        let auto_retry = config.no_client_auto_retry;
+        let max_retries = config.client_max_retries;
+        
         Some(tokio::spawn(async move {
-            if let Err(e) = client.run().await {
-                error!("Client error: {}", e);
+            let mut retry_count = 0;
+            let mut retry_delay = Duration::from_secs(1); // Start with 1 second delay
+            let mut packet_rx = Some(client_rx_rx);
+            
+            loop {
+                // Create a new client instance for each attempt
+                match QuicClient::new(target_addr_clone, ca_cert_clone.as_deref(), client_cert_clone.as_deref(), client_key_clone.as_deref(), conn_id_len).await {
+                    Ok(mut client) => {
+                        client.set_tun_injector(tun_injector_clone.clone());
+                        if let Some(rx) = packet_rx.take() {
+                            client.set_packet_receiver(rx);
+                        }
+                        
+                        if retry_count > 0 {
+                            info!("🔄 Client reconnected successfully after {} retries", retry_count);
+                        }
+                        
+                        // Run the client
+                        match client.run().await {
+                            Err(e) => {
+                                error!("Client error: {}", e);
+                                
+                                if !auto_retry {
+                                    error!("Auto-retry disabled, client will not reconnect");
+                                    break;
+                                }
+                                
+                                retry_count += 1;
+                                
+                                if max_retries > 0 && retry_count > max_retries {
+                                    error!("Maximum retry attempts ({}) exceeded, giving up", max_retries);
+                                    break;
+                                }
+                                
+                                warn!("🔄 Client connection failed (attempt {}), retrying in {:?}...", retry_count, retry_delay);
+                                tokio::time::sleep(retry_delay).await;
+                                
+                                // Exponential backoff with jitter, max 30 seconds
+                                retry_delay = std::cmp::min(retry_delay * 2, Duration::from_secs(30));
+                            }
+                            Ok(_) => {
+                                // Client exited normally (connection closed gracefully)
+                                if auto_retry {
+                                    warn!("Client connection closed, attempting to reconnect...");
+                                    retry_count += 1;
+                                    
+                                    if max_retries > 0 && retry_count > max_retries {
+                                        error!("Maximum retry attempts ({}) exceeded, giving up", max_retries);
+                                        break;
+                                    }
+                                    
+                                    tokio::time::sleep(retry_delay).await;
+                                    retry_delay = std::cmp::min(retry_delay * 2, Duration::from_secs(30));
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to create client: {}", e);
+                        
+                        if !auto_retry {
+                            break;
+                        }
+                        
+                        retry_count += 1;
+                        
+                        if max_retries > 0 && retry_count > max_retries {
+                            error!("Maximum retry attempts ({}) exceeded, giving up", max_retries);
+                            break;
+                        }
+                        
+                        warn!("🔄 Client creation failed (attempt {}), retrying in {:?}...", retry_count, retry_delay);
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = std::cmp::min(retry_delay * 2, Duration::from_secs(30));
+                    }
+                }
             }
         }))
     } else {

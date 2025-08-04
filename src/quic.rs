@@ -327,6 +327,7 @@ pub struct QuicClient {
     connection: quiche::Connection,
     server_addr: SocketAddr,
     connection_established_logged: bool,
+    #[allow(dead_code)]
     conn_id_len: u8,
     tun_injector: Option<Sender<Vec<u8>>>,
     packet_rx: Option<Receiver<Vec<u8>>>,
