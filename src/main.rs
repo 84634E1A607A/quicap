@@ -16,14 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     
     let config = Config::parse();
-    
-    // Initialize logger based on verbosity
-    if config.verbose {
-        log::set_max_level(log::LevelFilter::Debug);
-    } else {
-        log::set_max_level(log::LevelFilter::Info);
-    }
-    
+
     debug!("Configuration: {:?}", config);
 
     // Create channels for packet forwarding
@@ -51,20 +44,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Netmask: {}", config.tun_netmask);
 
     // Start TUN device processing in background
-    let tun_verbose = config.verbose;
     tokio::spawn(async move {
-        if let Err(e) = tun_device.run(tun_verbose).await {
+        if let Err(e) = tun_device.run().await {
             error!("Error running TUN device: {}", e);
         }
     });
 
-    // Start QUIC in both server and client mode
+    // Start QUIC mode based on configuration
     let listen_addr = std::net::SocketAddr::new(config.listen_ip.into(), config.listen_port);
     let target_addr = std::net::SocketAddr::new(config.target_ip.into(), config.target_port);
     
-    info!("🚀 Starting QUIC in both server and client mode");
-    info!("   Server listening on: {}", listen_addr);
-    info!("   Client connecting to: {}", target_addr);
+    if config.server_only {
+        info!("🚀 Starting QUIC in server-only mode");
+        info!("   Server listening on: {}", listen_addr);
+    } else {
+        info!("🚀 Starting QUIC in both server and client mode");
+        info!("   Server listening on: {}", listen_addr);
+        info!("   Client connecting to: {}", target_addr);
+    }
     
     // Start server in background
     let server_task = {
@@ -78,51 +75,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
     
-    // Start client in background
-    let client_task = {
+    // Start client in background (only if not server-only mode)
+    let client_task = if !config.server_only {
         let mut client = QuicClient::new(target_addr, config.ca_cert.as_deref(), config.client_cert.as_deref(), config.client_key.as_deref(), config.conn_id_len).await?;
         client.set_tun_injector(tun_injector.clone());
         client.set_packet_receiver(client_rx_rx);
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             if let Err(e) = client.run().await {
                 error!("Client error: {}", e);
             }
-        })
+        }))
+    } else {
+        None
     };
 
-    // Start packet forwarding task (client is preferred)
+    // Start packet forwarding task
     let forwarding_task = {
         let client_tx = client_rx_tx;
         let server_tx = server_rx_tx;
         let mut tun_rx = tun_to_quic_rx;
+        let server_only = config.server_only;
         
         tokio::spawn(async move {
             while let Some(packet) = tun_rx.recv().await {
-                // Try client first (preferred path)
-                if client_tx.try_send(packet.clone()).is_err() {
-                    // Client channel full or closed, try server
+                if server_only {
+                    // Server-only mode: send all packets to server
                     if let Err(e) = server_tx.try_send(packet) {
-                        error!("Failed to forward packet to both client and server: {}", e);
+                        error!("Failed to forward packet to server: {}", e);
                     } else {
-                        debug!("✅ Forwarded packet via server (client unavailable)");
+                        debug!("✅ Forwarded packet via server (server-only mode)");
                     }
                 } else {
-                    debug!("✅ Forwarded packet via client (preferred)");
+                    // Both client and server mode: try client first (preferred path)
+                    if client_tx.try_send(packet.clone()).is_err() {
+                        // Client channel full or closed, try server
+                        if let Err(e) = server_tx.try_send(packet) {
+                            error!("Failed to forward packet to both client and server: {}", e);
+                        } else {
+                            debug!("✅ Forwarded packet via server (client unavailable)");
+                        }
+                    } else {
+                        debug!("✅ Forwarded packet via client (preferred)");
+                    }
                 }
             }
         })
     };
     
     // Wait for all tasks to complete (they should run indefinitely)
-    tokio::select! {
-        _ = server_task => {
-            error!("Server task completed unexpectedly");
+    if let Some(client_task) = client_task {
+        tokio::select! {
+            _ = server_task => {
+                error!("Server task completed unexpectedly");
+            }
+            _ = client_task => {
+                error!("Client task completed unexpectedly");
+            }
+            _ = forwarding_task => {
+                error!("Forwarding task completed unexpectedly");
+            }
         }
-        _ = client_task => {
-            error!("Client task completed unexpectedly");
-        }
-        _ = forwarding_task => {
-            error!("Forwarding task completed unexpectedly");
+    } else {
+        tokio::select! {
+            _ = server_task => {
+                error!("Server task completed unexpectedly");
+            }
+            _ = forwarding_task => {
+                error!("Forwarding task completed unexpectedly");
+            }
         }
     }
 

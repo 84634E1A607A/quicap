@@ -1,4 +1,4 @@
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -112,7 +112,6 @@ impl QuicServer {
                     }
                 } => {
                     if let Some(tun_packet) = packet {
-                        debug!("[SERVER] Received {} bytes from TUN device to forward", tun_packet.len());
                         self.forward_tun_packet_via_datagram(&tun_packet, &mut out_buf).await?;
                     }
                 }
@@ -128,10 +127,7 @@ impl QuicServer {
     async fn handle_packet(&mut self, packet: &mut [u8], from: SocketAddr, out_buf: &mut [u8; 1500]) -> std::io::Result<()> {
         let hdr = match quiche::Header::from_slice(packet, quiche::MAX_CONN_ID_LEN) {
             Ok(hdr) => hdr,
-            Err(e) => {
-                debug!("[SERVER] Invalid packet header from {}: {}", from, e);
-                return Ok(());
-            }
+            Err(_) => return Ok(()),
         };
 
         // Update activity timestamp for this connection
@@ -141,7 +137,7 @@ impl QuicServer {
         if let std::collections::hash_map::Entry::Vacant(entry) = self.connections.entry(from) {
             // Only create new connections for Initial packets
             if hdr.ty != quiche::Type::Initial {
-                debug!("[SERVER] Non-initial packet for unknown connection from {}", from);
+                warn!("[SERVER] Non-initial packet for unknown connection from {}", from);
                 return Ok(());
             }
 
@@ -179,12 +175,8 @@ impl QuicServer {
         };
         
         match conn.recv(packet, recv_info) {
-            Ok(_) => {
-                debug!("[SERVER] Processed packet from {}", from);
-            }
-            Err(quiche::Error::Done) => {
-                debug!("[SERVER] No more data to process from {}", from);
-            }
+            Ok(_) => {},
+            Err(quiche::Error::Done) => {},
             Err(e) => {
                 error!("[SERVER] Error processing packet from {}: {}", from, e);
                 return Ok(());
@@ -198,20 +190,13 @@ impl QuicServer {
                 Ok(len) => {
                     info!("[SERVER] 📨 Received DATAGRAM from {}: {} bytes", from, len);
                     if self.tun_injector.is_some() {
-                        debug!("[SERVER] Injecting {} bytes into TUN device", len);
-                        print_datagram_hex(&dgram_buf[..len]);
-                        
                         // Inject datagram into TUN device
                         if let Some(ref tun_injector) = self.tun_injector {
                             let packet = dgram_buf[..len].to_vec();
                             if let Err(e) = tun_injector.send(packet).await {
                                 error!("[SERVER] Failed to inject packet into TUN: {}", e);
-                            } else {
-                                debug!("[SERVER] ✅ Successfully injected packet into TUN");
                             }
                         }
-                    } else {
-                        warn!("[SERVER] No TUN injector available, dropping datagram");
                     }
                 }
                 Err(quiche::Error::Done) => break,
@@ -260,8 +245,6 @@ impl QuicServer {
             if conn.is_established() {
                 if let Some(last_activity) = self.last_activity.get(&addr) {
                     if last_activity.elapsed() >= keep_alive_interval && conn.send_ack_eliciting().is_ok() {
-                        debug!("[SERVER] 🏓 Sent keep-alive PING frame to {} after {} seconds of inactivity", 
-                               addr, last_activity.elapsed().as_secs());
                         // Update activity time to prevent immediate resending
                         self.last_activity.insert(addr, std::time::Instant::now());
                     }
@@ -324,15 +307,15 @@ impl QuicServer {
                             }
                         }
                     }
-                    Err(e) => {
-                        debug!("[SERVER] Cannot send datagram to {}: {}", addr, e);
+                    Err(_) => {
+                        // Cannot send datagram to this connection
                     }
                 }
             }
         }
         
         if !sent_any {
-            debug!("[SERVER] No established connections available to forward packet");
+            // No established connections available to forward packet
         }
         
         Ok(())
@@ -470,7 +453,6 @@ impl QuicClient {
                     }
                 } => {
                     if let Some(tun_packet) = packet {
-                        debug!("[CLIENT] Received {} bytes from TUN device to forward", tun_packet.len());
                         last_activity = std::time::Instant::now();
                         self.forward_tun_packet_via_datagram(&tun_packet, &mut out_buf).await?;
                     }
@@ -482,8 +464,6 @@ impl QuicClient {
                     
                     // Send keep-alive PING if we've been idle too long
                     if self.connection.is_established() && last_activity.elapsed() >= keep_alive_interval {
-                        debug!("[CLIENT] Sending keep-alive PING after {} seconds of inactivity", 
-                               last_activity.elapsed().as_secs());
                         self.send_ping_frame(&mut out_buf).await?;
                         last_activity = std::time::Instant::now();
                     }
@@ -522,12 +502,8 @@ impl QuicClient {
         };
         
         match self.connection.recv(packet, recv_info) {
-            Ok(_) => {
-                debug!("Processed packet from server");
-            }
-            Err(quiche::Error::Done) => {
-                debug!("No more data to process");
-            }
+            Ok(_) => {},
+            Err(quiche::Error::Done) => {},
             Err(e) => {
                 error!("Error processing packet: {}", e);
                 return Ok(());
@@ -546,20 +522,13 @@ impl QuicClient {
                 Ok(len) => {
                     info!("[CLIENT] 📨 Received DATAGRAM from server: {} bytes", len);
                     if self.tun_injector.is_some() {
-                        debug!("[CLIENT] Injecting {} bytes into TUN device", len);
-                        print_datagram_hex(&dgram_buf[..len]);
-                        
                         // Inject datagram into TUN device
                         if let Some(ref tun_injector) = self.tun_injector {
                             let packet = dgram_buf[..len].to_vec();
                             if let Err(e) = tun_injector.send(packet).await {
                                 error!("[CLIENT] Failed to inject packet into TUN: {}", e);
-                            } else {
-                                debug!("[CLIENT] ✅ Successfully injected packet into TUN");
                             }
                         }
-                    } else {
-                        warn!("[CLIENT] No TUN injector available, dropping datagram");
                     }
                 }
                 Err(quiche::Error::Done) => break,
@@ -606,8 +575,8 @@ impl QuicClient {
                     self.socket.send_to(&out_buf[..written], send_info.to).await?;
                 }
             }
-            Err(e) => {
-                debug!("Failed to send PING frame: {}", e);
+            Err(_) => {
+                // Failed to send PING frame
             }
         }
         Ok(())
@@ -656,47 +625,14 @@ impl QuicClient {
                         self.socket.send_to(&out_buf[..written], send_info.to).await?;
                     }
                 }
-                Err(e) => {
-                    debug!("[CLIENT] Cannot send datagram: {}", e);
+                Err(_) => {
+                    // Cannot send datagram
                 }
             }
         } else {
-            debug!("[CLIENT] Connection not established, cannot forward packet");
+            // Connection not established, cannot forward packet
         }
         
         Ok(())
     }
-}
-
-fn print_datagram_hex(data: &[u8]) {
-    for (i, chunk) in data.chunks(16).enumerate() {
-        print!("{:04x}: ", i * 16);
-
-        for (j, byte) in chunk.iter().enumerate() {
-            print!("{:02x} ", byte);
-            if j == 7 {
-                print!(" ");
-            }
-        }
-
-        for j in chunk.len()..16 {
-            print!("   ");
-            if j == 7 {
-                print!(" ");
-            }
-        }
-
-        print!(" |");
-
-        for byte in chunk {
-            if *byte >= 32 && *byte <= 126 {
-                print!("{}", *byte as char);
-            } else {
-                print!(".");
-            }
-        }
-
-        println!("|");
-    }
-    println!();
 }

@@ -18,10 +18,6 @@ pub struct Config {
     #[arg(long = "name", default_value = "quicap0")]
     pub tun_name: String,
 
-    /// Enable verbose output
-    #[arg(short, long)]
-    pub verbose: bool,
-
     /// Listen IP address for server
     #[arg(long, default_value = "127.0.0.1")]
     pub listen_ip: Ipv4Addr,
@@ -61,6 +57,10 @@ pub struct Config {
     /// Connection ID length (4-20 bytes)
     #[arg(long, default_value = "16", value_parser = validate_conn_id_len)]
     pub conn_id_len: u8,
+    
+    /// Disable QUIC client mode (server only)
+    #[arg(long)]
+    pub server_only: bool,
 }
 
 fn validate_conn_id_len(s: &str) -> Result<u8, String> {
