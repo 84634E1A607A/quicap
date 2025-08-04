@@ -49,4 +49,24 @@ pub struct Config {
     /// Path to CA certificate file for client trust verification
     #[arg(long, default_value = "certs/ca.crt")]
     pub ca_cert: Option<String>,
+    
+    /// Path to client certificate file for mutual TLS
+    #[arg(long, default_value = "certs/client.crt")]
+    pub client_cert: Option<String>,
+    
+    /// Path to client private key file for mutual TLS
+    #[arg(long, default_value = "certs/client.key")]
+    pub client_key: Option<String>,
+    
+    /// Connection ID length (4-20 bytes)
+    #[arg(long, default_value = "16", value_parser = validate_conn_id_len)]
+    pub conn_id_len: u8,
+}
+
+fn validate_conn_id_len(s: &str) -> Result<u8, String> {
+    let len: u8 = s.parse().map_err(|_| "Connection ID length must be a number")?;
+    if !(4..=20).contains(&len) {
+        return Err("Connection ID length must be between 4 and 20 bytes".to_string());
+    }
+    Ok(len)
 }

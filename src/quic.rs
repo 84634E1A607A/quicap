@@ -10,10 +10,11 @@ pub struct QuicServer {
     socket: Arc<UdpSocket>,
     config: quiche::Config,
     connections: HashMap<SocketAddr, quiche::Connection>,
+    conn_id_len: u8,
 }
 
 impl QuicServer {
-    pub async fn new(listen_addr: SocketAddr, cert_file: &str, key_file: &str) -> std::io::Result<Self> {
+    pub async fn new(listen_addr: SocketAddr, cert_file: &str, key_file: &str, ca_cert: Option<&str>, conn_id_len: u8) -> std::io::Result<Self> {
         let socket = UdpSocket::bind(listen_addr).await?;
         info!("[SERVER] QUIC server listening on {}", listen_addr);
 
@@ -35,6 +36,21 @@ impl QuicServer {
 
         config.set_application_protos(&[b"quicap"])
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            
+        // Configure mutual TLS if CA certificate is provided
+        if let Some(ca_path) = ca_cert {
+            if let Err(e) = config.load_verify_locations_from_file(ca_path) {
+                warn!("[SERVER] Could not load CA certificate from {}: {}", ca_path, e);
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, 
+                    format!("CA certificate not found. Please ensure {} exists.", ca_path)));
+            }
+            config.verify_peer(true);
+            info!("[SERVER] Enabled mutual TLS with CA certificate from {}", ca_path);
+        } else {
+            config.verify_peer(false);
+            info!("[SERVER] Mutual TLS disabled - no CA certificate provided");
+        }
+        
         config.set_max_idle_timeout(30000);
         config.set_max_recv_udp_payload_size(1350);
         config.set_max_send_udp_payload_size(1350);
@@ -50,6 +66,7 @@ impl QuicServer {
             socket: Arc::new(socket),
             config,
             connections: HashMap::new(),
+            conn_id_len,
         })
     }
 
@@ -89,7 +106,7 @@ impl QuicServer {
         };
 
         // Check if we have an existing connection for this address
-        if !self.connections.contains_key(&from) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.connections.entry(from) {
             // Only create new connections for Initial packets
             if hdr.ty != quiche::Type::Initial {
                 debug!("[SERVER] Non-initial packet for unknown connection from {}", from);
@@ -98,9 +115,9 @@ impl QuicServer {
 
             // Create new connection for initial packet
             let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-            let scid_len = 16;
-            // Generate a random SCID instead of using a predictable counter
-            scid[..scid_len].iter_mut().for_each(|b| *b = rand::random::<u8>());
+            let scid_len = self.conn_id_len.min(quiche::MAX_CONN_ID_LEN as u8) as usize;
+            // Generate a random SCID with lowercase letters only
+            scid.iter_mut().take(scid_len).for_each(|x| *x = b'a' + (rand::random::<u8>() % 26));
             let scid = quiche::ConnectionId::from_ref(&scid[..scid_len]);
             
             let odcid = if !hdr.dcid.is_empty() {
@@ -119,7 +136,7 @@ impl QuicServer {
             };
 
             info!("[SERVER] New QUIC connection from {}", from);
-            self.connections.insert(from, conn);
+            entry.insert(conn);
         }
 
         let conn = self.connections.get_mut(&from).unwrap();
@@ -233,10 +250,11 @@ pub struct QuicClient {
     connection: quiche::Connection,
     server_addr: SocketAddr,
     connection_established_logged: bool,
+    conn_id_len: u8,
 }
 
 impl QuicClient {
-    pub async fn new(server_addr: SocketAddr, ca_cert: Option<&str>) -> std::io::Result<Self> {
+    pub async fn new(server_addr: SocketAddr, ca_cert: Option<&str>, client_cert: Option<&str>, client_key: Option<&str>, conn_id_len: u8) -> std::io::Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         info!("QUIC client connecting to {}", server_addr);
 
@@ -268,10 +286,30 @@ impl QuicClient {
             config.verify_peer(false); // Allow cert errors when no CA is specified
             warn!("No CA certificate specified, disabling peer verification");
         }
+        
+        // Configure client certificate for mutual TLS
+        if let (Some(cert_path), Some(key_path)) = (client_cert, client_key) {
+            if let Err(e) = config.load_cert_chain_from_pem_file(cert_path) {
+                warn!("Could not load client certificate from {}: {}", cert_path, e);
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, 
+                    format!("Client certificate not found. Please ensure {} exists.", cert_path)));
+            }
+            
+            if let Err(e) = config.load_priv_key_from_pem_file(key_path) {
+                warn!("Could not load client private key from {}: {}", key_path, e);
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, 
+                    format!("Client private key not found. Please ensure {} exists.", key_path)));
+            }
+            
+            info!("Configured client certificate for mutual TLS");
+        } else {
+            info!("No client certificate specified - using server-only TLS");
+        }
 
         let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-        let scid_len = 16;
-        scid[..8].copy_from_slice(&rand::random::<u64>().to_be_bytes());
+        let scid_len = conn_id_len.min(quiche::MAX_CONN_ID_LEN as u8) as usize;
+        // Generate a random SCID with lowercase letters only
+        scid.iter_mut().take(scid_len).for_each(|x| *x = b'a' + (rand::random::<u8>() % 26));
         let scid = quiche::ConnectionId::from_ref(&scid[..scid_len]);
         
         let local_addr = socket.local_addr()?;
@@ -283,6 +321,7 @@ impl QuicClient {
             connection,
             server_addr,
             connection_established_logged: false,
+            conn_id_len,
         })
     }
 
