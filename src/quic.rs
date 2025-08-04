@@ -5,12 +5,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time;
+use tokio::sync::mpsc::{Sender, Receiver};
 
 pub struct QuicServer {
     socket: Arc<UdpSocket>,
     config: quiche::Config,
     connections: HashMap<SocketAddr, quiche::Connection>,
     conn_id_len: u8,
+    tun_injector: Option<Sender<Vec<u8>>>,
+    packet_rx: Option<Receiver<Vec<u8>>>,
 }
 
 impl QuicServer {
@@ -67,12 +70,23 @@ impl QuicServer {
             config,
             connections: HashMap::new(),
             conn_id_len,
+            tun_injector: None,
+            packet_rx: None,
         })
+    }
+
+    pub fn set_tun_injector(&mut self, tun_injector: Sender<Vec<u8>>) {
+        self.tun_injector = Some(tun_injector);
+    }
+
+    pub fn set_packet_receiver(&mut self, packet_rx: Receiver<Vec<u8>>) {
+        self.packet_rx = Some(packet_rx);
     }
 
     pub async fn run(&mut self) -> std::io::Result<()> {
         let mut buf = [0; 1500];
         let mut out_buf = [0; 1500];
+        let mut packet_rx = self.packet_rx.take();
 
         loop {
             tokio::select! {
@@ -85,6 +99,19 @@ impl QuicServer {
                         Err(e) => {
                             error!("[SERVER] Error receiving packet: {}", e);
                         }
+                    }
+                }
+
+                // Handle packets from TUN device to forward via QUIC
+                packet = async {
+                    match &mut packet_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(tun_packet) = packet {
+                        debug!("[SERVER] Received {} bytes from TUN device to forward", tun_packet.len());
+                        self.forward_tun_packet_via_datagram(&tun_packet, &mut out_buf).await?;
                     }
                 }
 
@@ -165,17 +192,21 @@ impl QuicServer {
             match conn.dgram_recv(&mut dgram_buf) {
                 Ok(len) => {
                     info!("[SERVER] 📨 Received DATAGRAM from {}: {} bytes", from, len);
-                    print_datagram_hex(&dgram_buf[..len]);
-                    
-                    // Send ping response
-                    let ping_data = b"PONG from server";
-                    match conn.dgram_send(ping_data) {
-                        Ok(_) => {
-                            info!("[SERVER] 🏓 Sent PONG datagram to {}", from);
+                    if self.tun_injector.is_some() {
+                        debug!("[SERVER] Injecting {} bytes into TUN device", len);
+                        print_datagram_hex(&dgram_buf[..len]);
+                        
+                        // Inject datagram into TUN device
+                        if let Some(ref tun_injector) = self.tun_injector {
+                            let packet = dgram_buf[..len].to_vec();
+                            if let Err(e) = tun_injector.send(packet).await {
+                                error!("[SERVER] Failed to inject packet into TUN: {}", e);
+                            } else {
+                                debug!("[SERVER] ✅ Successfully injected packet into TUN");
+                            }
                         }
-                        Err(e) => {
-                            error!("[SERVER] Failed to send PONG datagram: {}", e);
-                        }
+                    } else {
+                        warn!("[SERVER] No TUN injector available, dropping datagram");
                     }
                 }
                 Err(quiche::Error::Done) => break,
@@ -243,6 +274,47 @@ impl QuicServer {
 
         Ok(())
     }
+
+    async fn forward_tun_packet_via_datagram(&mut self, packet: &[u8], out_buf: &mut [u8; 1500]) -> std::io::Result<()> {
+        let mut sent_any = false;
+        
+        // Try to send via all established connections
+        for (&addr, conn) in &mut self.connections {
+            if conn.is_established() {
+                match conn.dgram_send(packet) {
+                    Ok(_) => {
+                        info!("[SERVER] 📤 Forwarded {} bytes via DATAGRAM to {}", packet.len(), addr);
+                        sent_any = true;
+                        
+                        // Send any resulting packets
+                        loop {
+                            let (written, send_info) = match conn.send(out_buf) {
+                                Ok(v) => v,
+                                Err(quiche::Error::Done) => break,
+                                Err(e) => {
+                                    error!("[SERVER] Error sending datagram packet: {}", e);
+                                    break;
+                                }
+                            };
+
+                            if let Err(e) = self.socket.send_to(&out_buf[..written], send_info.to).await {
+                                error!("[SERVER] Error sending UDP packet: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("[SERVER] Cannot send datagram to {}: {}", addr, e);
+                    }
+                }
+            }
+        }
+        
+        if !sent_any {
+            debug!("[SERVER] No established connections available to forward packet");
+        }
+        
+        Ok(())
+    }
 }
 
 pub struct QuicClient {
@@ -251,6 +323,8 @@ pub struct QuicClient {
     server_addr: SocketAddr,
     connection_established_logged: bool,
     conn_id_len: u8,
+    tun_injector: Option<Sender<Vec<u8>>>,
+    packet_rx: Option<Receiver<Vec<u8>>>,
 }
 
 impl QuicClient {
@@ -322,13 +396,23 @@ impl QuicClient {
             server_addr,
             connection_established_logged: false,
             conn_id_len,
+            tun_injector: None,
+            packet_rx: None,
         })
+    }
+
+    pub fn set_tun_injector(&mut self, tun_injector: Sender<Vec<u8>>) {
+        self.tun_injector = Some(tun_injector);
+    }
+
+    pub fn set_packet_receiver(&mut self, packet_rx: Receiver<Vec<u8>>) {
+        self.packet_rx = Some(packet_rx);
     }
 
     pub async fn run(&mut self) -> std::io::Result<()> {
         let mut buf = [0; 1500];
         let mut out_buf = [0; 1500];
-        let mut ping_timer = time::interval(Duration::from_secs(5));
+        let mut packet_rx = self.packet_rx.take();
 
         // Initial handshake
         self.send_initial_packets(&mut out_buf).await?;
@@ -353,10 +437,16 @@ impl QuicClient {
                     }
                 }
 
-                // Send periodic pings
-                _ = ping_timer.tick() => {
-                    if self.connection.is_established() {
-                        self.send_ping_datagram().await?;
+                // Handle packets from TUN device to forward via QUIC (preferred path)
+                packet = async {
+                    match &mut packet_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(tun_packet) = packet {
+                        debug!("[CLIENT] Received {} bytes from TUN device to forward", tun_packet.len());
+                        self.forward_tun_packet_via_datagram(&tun_packet, &mut out_buf).await?;
                     }
                 }
 
@@ -420,8 +510,23 @@ impl QuicClient {
         loop {
             match self.connection.dgram_recv(&mut dgram_buf) {
                 Ok(len) => {
-                    info!("📨 Received DATAGRAM from server: {} bytes", len);
-                    print_datagram_hex(&dgram_buf[..len]);
+                    info!("[CLIENT] 📨 Received DATAGRAM from server: {} bytes", len);
+                    if self.tun_injector.is_some() {
+                        debug!("[CLIENT] Injecting {} bytes into TUN device", len);
+                        print_datagram_hex(&dgram_buf[..len]);
+                        
+                        // Inject datagram into TUN device
+                        if let Some(ref tun_injector) = self.tun_injector {
+                            let packet = dgram_buf[..len].to_vec();
+                            if let Err(e) = tun_injector.send(packet).await {
+                                error!("[CLIENT] Failed to inject packet into TUN: {}", e);
+                            } else {
+                                debug!("[CLIENT] ✅ Successfully injected packet into TUN");
+                            }
+                        }
+                    } else {
+                        warn!("[CLIENT] No TUN injector available, dropping datagram");
+                    }
                 }
                 Err(quiche::Error::Done) => break,
                 Err(e) => {
@@ -496,6 +601,37 @@ impl QuicClient {
             }
         }
 
+        Ok(())
+    }
+
+    async fn forward_tun_packet_via_datagram(&mut self, packet: &[u8], out_buf: &mut [u8; 1500]) -> std::io::Result<()> {
+        if self.connection.is_established() {
+            match self.connection.dgram_send(packet) {
+                Ok(_) => {
+                    info!("[CLIENT] 📤 Forwarded {} bytes via DATAGRAM to server", packet.len());
+                    
+                    // Send any resulting packets
+                    loop {
+                        let (written, send_info) = match self.connection.send(out_buf) {
+                            Ok(v) => v,
+                            Err(quiche::Error::Done) => break,
+                            Err(e) => {
+                                error!("[CLIENT] Error sending datagram packet: {}", e);
+                                break;
+                            }
+                        };
+
+                        self.socket.send_to(&out_buf[..written], send_info.to).await?;
+                    }
+                }
+                Err(e) => {
+                    debug!("[CLIENT] Cannot send datagram: {}", e);
+                }
+            }
+        } else {
+            debug!("[CLIENT] Connection not established, cannot forward packet");
+        }
+        
         Ok(())
     }
 }

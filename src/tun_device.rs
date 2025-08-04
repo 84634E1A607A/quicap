@@ -10,6 +10,7 @@ pub struct TunDevice {
     name: String,
     rx_tun: Arc<Tun>, // for receiving
     tx: Sender<Vec<u8>>, // channel to send write packets
+    packet_tx: Option<Sender<Vec<u8>>>, // channel to forward packets to QUIC
 }
 
 impl TunDevice {
@@ -39,23 +40,20 @@ impl TunDevice {
             name: name.to_string(),
             rx_tun,
             tx,
+            packet_tx: None,
         })
+    }
+
+    pub fn set_packet_forwarder(&mut self, packet_tx: Sender<Vec<u8>>) {
+        self.packet_tx = Some(packet_tx);
+    }
+
+    pub fn get_packet_injector(&self) -> Sender<Vec<u8>> {
+        self.tx.clone()
     }
 
     pub async fn run(&self, verbose: bool) -> io::Result<()> {
         info!("TUN device {} is running. Press Ctrl+C to stop.", self.name);
-
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                info!("Injecting ping request to 172.30.12.5...");
-                let ping_packet = create_ping_packet();
-                if let Err(e) = tx.send(ping_packet).await {
-                    error!("Failed to inject ping packet: {}", e);
-                }
-            }
-        });
 
         let mut buffer = [0u8; 1500]; // MTU size buffer
 
@@ -68,6 +66,16 @@ impl TunDevice {
                     }
 
                     self.parse_and_print_packet(&buffer[..n]).await;
+
+                    // Forward packet to QUIC if forwarder is available
+                    if let Some(ref packet_tx) = self.packet_tx {
+                        let packet = buffer[..n].to_vec();
+                        if let Err(e) = packet_tx.send(packet).await {
+                            error!("Failed to forward packet to QUIC: {}", e);
+                        } else {
+                            debug!("✅ Forwarded {} bytes to QUIC", n);
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("Error reading from TUN: {}", e);

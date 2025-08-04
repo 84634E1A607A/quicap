@@ -26,8 +26,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     debug!("Configuration: {:?}", config);
 
+    // Create channels for packet forwarding
+    let (tun_to_quic_tx, tun_to_quic_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+    let (client_rx_tx, client_rx_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+    let (server_rx_tx, server_rx_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+
     // Start TUN device in background
-    let tun_device = match TunDevice::new(&config.tun_name, config.tun_ip, config.tun_netmask).await {
+    let mut tun_device = match TunDevice::new(&config.tun_name, config.tun_ip, config.tun_netmask).await {
         Ok(device) => device,
         Err(e) => {
             error!("Failed to create TUN device: {}", e);
@@ -35,6 +40,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(e.into());
         }
     };
+
+    // Set up packet forwarding from TUN to QUIC
+    tun_device.set_packet_forwarder(tun_to_quic_tx.clone());
+    let tun_injector = tun_device.get_packet_injector();
 
     info!("✅ TUN device created successfully!");
     info!("TUN Interface: {}", config.tun_name);
@@ -60,6 +69,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start server in background
     let server_task = {
         let mut server = QuicServer::new(listen_addr, &config.cert_file, &config.key_file, config.ca_cert.as_deref(), config.conn_id_len).await?;
+        server.set_tun_injector(tun_injector.clone());
+        server.set_packet_receiver(server_rx_rx);
         tokio::spawn(async move {
             if let Err(e) = server.run().await {
                 error!("Server error: {}", e);
@@ -70,20 +81,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start client in background
     let client_task = {
         let mut client = QuicClient::new(target_addr, config.ca_cert.as_deref(), config.client_cert.as_deref(), config.client_key.as_deref(), config.conn_id_len).await?;
+        client.set_tun_injector(tun_injector.clone());
+        client.set_packet_receiver(client_rx_rx);
         tokio::spawn(async move {
             if let Err(e) = client.run().await {
                 error!("Client error: {}", e);
             }
         })
     };
+
+    // Start packet forwarding task (client is preferred)
+    let forwarding_task = {
+        let client_tx = client_rx_tx;
+        let server_tx = server_rx_tx;
+        let mut tun_rx = tun_to_quic_rx;
+        
+        tokio::spawn(async move {
+            while let Some(packet) = tun_rx.recv().await {
+                // Try client first (preferred path)
+                if client_tx.try_send(packet.clone()).is_err() {
+                    // Client channel full or closed, try server
+                    if let Err(e) = server_tx.try_send(packet) {
+                        error!("Failed to forward packet to both client and server: {}", e);
+                    } else {
+                        debug!("✅ Forwarded packet via server (client unavailable)");
+                    }
+                } else {
+                    debug!("✅ Forwarded packet via client (preferred)");
+                }
+            }
+        })
+    };
     
-    // Wait for both tasks to complete (they should run indefinitely)
+    // Wait for all tasks to complete (they should run indefinitely)
     tokio::select! {
         _ = server_task => {
             error!("Server task completed unexpectedly");
         }
         _ = client_task => {
             error!("Client task completed unexpectedly");
+        }
+        _ = forwarding_task => {
+            error!("Forwarding task completed unexpectedly");
         }
     }
 
