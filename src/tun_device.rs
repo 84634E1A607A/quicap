@@ -1,15 +1,15 @@
 use log::{error, info};
 use std::io;
 use std::net::Ipv4Addr;
-use tokio::sync::mpsc::{self, Sender, Receiver};
-use tokio_tun::{Tun, TunBuilder};
 use std::sync::Arc;
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio_tun::{Tun, TunBuilder};
 
 #[derive(Clone)]
 pub struct TunDevice {
     name: String,
-    rx_tun: Arc<Tun>, // for receiving
-    tx: Sender<Vec<u8>>, // channel to send write packets
+    rx_tun: Arc<Tun>,                   // for receiving
+    tx: Sender<Vec<u8>>,                // channel to send write packets
     packet_tx: Option<Sender<Vec<u8>>>, // channel to forward packets to QUIC
 }
 
@@ -22,14 +22,15 @@ impl TunDevice {
             .mtu(1350)
             .up()
             .build()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
-        let tun = Arc::new(tuns.pop().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "Failed to create TUN interface")
-        })?);
+        let tun = Arc::new(
+            tuns.pop()
+                .ok_or_else(|| io::Error::other("Failed to create TUN interface"))?,
+        );
 
         let rx_tun = tun.clone(); // for reading
-        let tx_tun = tun;     // for writing
+        let tx_tun = tun; // for writing
 
         let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(1024);
 
@@ -65,12 +66,12 @@ impl TunDevice {
                     if let Some(ref packet_tx) = self.packet_tx {
                         let packet = buffer[..n].to_vec();
                         if let Err(e) = packet_tx.send(packet).await {
-                            error!("Failed to forward packet to QUIC: {}", e);
+                            error!("Failed to forward packet to QUIC: {e}");
                         }
                     }
                 }
                 Err(e) => {
-                    error!("Error reading from TUN: {}", e);
+                    error!("Error reading from TUN: {e}");
                     break;
                 }
             }
@@ -84,7 +85,7 @@ impl TunDevice {
 async fn writer_loop(tun: Arc<Tun>, mut rx: Receiver<Vec<u8>>) {
     while let Some(packet) = rx.recv().await {
         if let Err(e) = tun.send(&packet).await {
-            error!("Failed to write to TUN: {}", e);
+            error!("Failed to write to TUN: {e}");
         }
     }
 }

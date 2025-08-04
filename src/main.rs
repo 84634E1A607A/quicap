@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let config = Config::parse();
 
-    debug!("Configuration: {:?}", config);
+    debug!("Configuration: {config:?}");
 
     // Create channels for packet forwarding
     let (tun_to_quic_tx, tun_to_quic_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tun_device = match TunDevice::new(&config.tun_name, config.tun_ip, config.tun_netmask).await {
         Ok(device) => device,
         Err(e) => {
-            error!("Failed to create TUN device: {}", e);
+            error!("Failed to create TUN device: {e}");
             error!("Note: You may need to run this program with sudo privileges");
             return Err(e.into());
         }
@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start TUN device processing in background
     tokio::spawn(async move {
         if let Err(e) = tun_device.run().await {
-            error!("Error running TUN device: {}", e);
+            error!("Error running TUN device: {e}");
         }
     });
 
@@ -63,11 +63,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     if config.server_only {
         info!("🚀 Starting QUIC in server-only mode");
-        info!("   Server listening on: {}", listen_addr);
+        info!("   Server listening on: {listen_addr}");
     } else {
         info!("🚀 Starting QUIC in both server and client mode");
-        info!("   Server listening on: {}", listen_addr);
-        info!("   Client connecting to: {}", target_addr);
+        info!("   Server listening on: {listen_addr}");
+        info!("   Client connecting to: {target_addr}");
     }
     
     // Start server in background
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         server.set_packet_receiver(server_rx_rx);
         tokio::spawn(async move {
             if let Err(e) = server.run().await {
-                error!("Server error: {}", e);
+                error!("Server error: {e}");
             }
         })
     };
@@ -115,13 +115,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         
                         if retry_count > 0 {
-                            info!("🔄 Client reconnected successfully after {} retries", retry_count);
+                            info!("🔄 Client reconnected successfully after {retry_count} retries");
                         }
                         
                         // Run the client
                         match client.run().await {
                             Err(e) => {
-                                error!("Client error: {}", e);
+                                error!("Client error: {e}");
                                 
                                 if !auto_retry {
                                     error!("Auto-retry disabled, client will not reconnect");
@@ -131,11 +131,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 retry_count += 1;
                                 
                                 if max_retries > 0 && retry_count > max_retries {
-                                    error!("Maximum retry attempts ({}) exceeded, giving up", max_retries);
+                                    error!("Maximum retry attempts ({max_retries}) exceeded, giving up");
                                     break;
                                 }
                                 
-                                warn!("🔄 Client connection failed (attempt {}), retrying in {:?}...", retry_count, retry_delay);
+                                warn!("🔄 Client connection failed (attempt {retry_count}), retrying in {retry_delay:?}...");
                                 tokio::time::sleep(retry_delay).await;
                                 
                                 // Exponential backoff with jitter, max MAX_RETRY_DELAY
@@ -148,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     retry_count += 1;
                                     
                                     if max_retries > 0 && retry_count > max_retries {
-                                        error!("Maximum retry attempts ({}) exceeded, giving up", max_retries);
+                                        error!("Maximum retry attempts ({max_retries}) exceeded, giving up");
                                         break;
                                     }
                                     
@@ -161,7 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to create client: {}", e);
+                        error!("Failed to create client: {e}");
                         
                         if !auto_retry {
                             break;
@@ -170,11 +170,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         retry_count += 1;
                         
                         if max_retries > 0 && retry_count > max_retries {
-                            error!("Maximum retry attempts ({}) exceeded, giving up", max_retries);
+                            error!("Maximum retry attempts ({max_retries}) exceeded, giving up");
                             break;
                         }
                         
-                        warn!("🔄 Client creation failed (attempt {}), retrying in {:?}...", retry_count, retry_delay);
+                        warn!("🔄 Client creation failed (attempt {retry_count}), retrying in {retry_delay:?}...");
                         tokio::time::sleep(retry_delay).await;
                         retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
                     }
@@ -197,7 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if server_only {
                     // Server-only mode: send all packets to server
                     if let Err(e) = server_tx.try_send(packet) {
-                        error!("Failed to forward packet to server: {}", e);
+                        error!("Failed to forward packet to server: {e}");
                     } else {
                         debug!("✅ Forwarded packet via server (server-only mode)");
                     }
@@ -206,7 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if client_tx.try_send(packet.clone()).is_err() {
                         // Client channel full or closed, try server
                         if let Err(e) = server_tx.try_send(packet) {
-                            error!("Failed to forward packet to both client and server: {}", e);
+                            error!("Failed to forward packet to both client and server: {e}");
                         } else {
                             debug!("✅ Forwarded packet via server (client unavailable)");
                         }

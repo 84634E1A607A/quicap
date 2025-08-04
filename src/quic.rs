@@ -4,8 +4,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time;
-use tokio::sync::mpsc::{Sender, Receiver};
 
 pub struct QuicServer {
     socket: Arc<UdpSocket>,
@@ -18,43 +18,56 @@ pub struct QuicServer {
 }
 
 impl QuicServer {
-    pub async fn new(listen_addr: SocketAddr, cert_file: &str, key_file: &str, ca_cert: Option<&str>, conn_id_len: u8) -> std::io::Result<Self> {
+    pub async fn new(
+        listen_addr: SocketAddr,
+        cert_file: &str,
+        key_file: &str,
+        ca_cert: Option<&str>,
+        conn_id_len: u8,
+    ) -> std::io::Result<Self> {
         let socket = UdpSocket::bind(listen_addr).await?;
-        info!("[SERVER] QUIC server listening on {}", listen_addr);
+        info!("[SERVER] QUIC server listening on {listen_addr}");
 
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        
+        let mut config =
+            quiche::Config::new(quiche::PROTOCOL_VERSION).map_err(std::io::Error::other)?;
+
         // Server configuration - try to load certificates
         if let Err(e) = config.load_cert_chain_from_pem_file(cert_file) {
-            warn!("[SERVER] Could not load {}: {}", cert_file, e);
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, 
-                format!("Server certificate not found. Please ensure {} exists.", cert_file)));
-        }
-        
-        if let Err(e) = config.load_priv_key_from_pem_file(key_file) {
-            warn!("[SERVER] Could not load {}: {}", key_file, e);
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, 
-                format!("Server private key not found. Please ensure {} exists.", key_file)));
+            warn!("[SERVER] Could not load {cert_file}: {e}");
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Server certificate not found. Please ensure {cert_file} exists."),
+            ));
         }
 
-        config.set_application_protos(&[b"quicap"])
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-            
+        if let Err(e) = config.load_priv_key_from_pem_file(key_file) {
+            warn!("[SERVER] Could not load {key_file}: {e}");
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Server private key not found. Please ensure {key_file} exists."),
+            ));
+        }
+
+        config
+            .set_application_protos(&[b"quicap"])
+            .map_err(std::io::Error::other)?;
+
         // Configure mutual TLS if CA certificate is provided
         if let Some(ca_path) = ca_cert {
             if let Err(e) = config.load_verify_locations_from_file(ca_path) {
-                warn!("[SERVER] Could not load CA certificate from {}: {}", ca_path, e);
-                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, 
-                    format!("CA certificate not found. Please ensure {} exists.", ca_path)));
+                warn!("[SERVER] Could not load CA certificate from {ca_path}: {e}");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("CA certificate not found. Please ensure {ca_path} exists."),
+                ));
             }
             config.verify_peer(true);
-            info!("[SERVER] Enabled mutual TLS with CA certificate from {}", ca_path);
+            info!("[SERVER] Enabled mutual TLS with CA certificate from {ca_path}");
         } else {
             config.verify_peer(false);
             info!("[SERVER] Mutual TLS disabled - no CA certificate provided");
         }
-        
+
         config.set_max_idle_timeout(30000);
         config.set_max_recv_udp_payload_size(1400);
         config.set_max_send_udp_payload_size(1400);
@@ -99,7 +112,7 @@ impl QuicServer {
                             self.handle_packet(&mut buf[..len], from, &mut out_buf).await?;
                         }
                         Err(e) => {
-                            error!("[SERVER] Error receiving packet: {}", e);
+                            error!("[SERVER] Error receiving packet: {e}");
                         }
                     }
                 }
@@ -124,7 +137,12 @@ impl QuicServer {
         }
     }
 
-    async fn handle_packet(&mut self, packet: &mut [u8], from: SocketAddr, out_buf: &mut [u8; 1500]) -> std::io::Result<()> {
+    async fn handle_packet(
+        &mut self,
+        packet: &mut [u8],
+        from: SocketAddr,
+        out_buf: &mut [u8; 1500],
+    ) -> std::io::Result<()> {
         let hdr = match quiche::Header::from_slice(packet, quiche::MAX_CONN_ID_LEN) {
             Ok(hdr) => hdr,
             Err(_) => return Ok(()),
@@ -137,7 +155,7 @@ impl QuicServer {
         if let std::collections::hash_map::Entry::Vacant(entry) = self.connections.entry(from) {
             // Only create new connections for Initial packets
             if hdr.ty != quiche::Type::Initial {
-                warn!("[SERVER] Non-initial packet for unknown connection from {}", from);
+                warn!("[SERVER] Non-initial packet for unknown connection from {from}");
                 return Ok(());
             }
 
@@ -145,9 +163,11 @@ impl QuicServer {
             let mut scid = [0; quiche::MAX_CONN_ID_LEN];
             let scid_len = self.conn_id_len.min(quiche::MAX_CONN_ID_LEN as u8) as usize;
             // Generate a random SCID with lowercase letters only
-            scid.iter_mut().take(scid_len).for_each(|x| *x = b'a' + (rand::random::<u8>() % 26));
+            scid.iter_mut()
+                .take(scid_len)
+                .for_each(|x| *x = b'a' + (rand::random::<u8>() % 26));
             let scid = quiche::ConnectionId::from_ref(&scid[..scid_len]);
-            
+
             let odcid = if !hdr.dcid.is_empty() {
                 Some(&hdr.dcid)
             } else {
@@ -158,27 +178,27 @@ impl QuicServer {
             let conn = match quiche::accept(&scid, odcid, local_addr, from, &mut self.config) {
                 Ok(conn) => conn,
                 Err(e) => {
-                    error!("[SERVER] Failed to accept connection from {}: {}", from, e);
+                    error!("[SERVER] Failed to accept connection from {from}: {e}");
                     return Ok(());
                 }
             };
 
-            info!("[SERVER] New QUIC connection from {}", from);
+            info!("[SERVER] New QUIC connection from {from}");
             entry.insert(conn);
         }
 
         let conn = self.connections.get_mut(&from).unwrap();
 
-        let recv_info = quiche::RecvInfo { 
+        let recv_info = quiche::RecvInfo {
             to: self.socket.local_addr()?,
-            from 
+            from,
         };
-        
+
         match conn.recv(packet, recv_info) {
-            Ok(_) => {},
-            Err(quiche::Error::Done) => {},
+            Ok(_) => {}
+            Err(quiche::Error::Done) => {}
             Err(e) => {
-                error!("[SERVER] Error processing packet from {}: {}", from, e);
+                error!("[SERVER] Error processing packet from {from}: {e}");
                 return Ok(());
             }
         }
@@ -188,20 +208,20 @@ impl QuicServer {
         loop {
             match conn.dgram_recv(&mut dgram_buf) {
                 Ok(len) => {
-                    info!("[SERVER] 📨 Received DATAGRAM from {}: {} bytes", from, len);
+                    info!("[SERVER] 📨 Received DATAGRAM from {from}: {len} bytes");
                     if self.tun_injector.is_some() {
                         // Inject datagram into TUN device
                         if let Some(ref tun_injector) = self.tun_injector {
                             let packet = dgram_buf[..len].to_vec();
                             if let Err(e) = tun_injector.send(packet).await {
-                                error!("[SERVER] Failed to inject packet into TUN: {}", e);
+                                error!("[SERVER] Failed to inject packet into TUN: {e}");
                             }
                         }
                     }
                 }
                 Err(quiche::Error::Done) => break,
                 Err(e) => {
-                    error!("[SERVER] Error receiving datagram: {}", e);
+                    error!("[SERVER] Error receiving datagram: {e}");
                     break;
                 }
             }
@@ -213,13 +233,16 @@ impl QuicServer {
                 Ok(v) => v,
                 Err(quiche::Error::Done) => break,
                 Err(e) => {
-                    error!("[SERVER] Error sending packet: {}", e);
+                    error!("[SERVER] Error sending packet: {e}");
                     break;
                 }
             };
 
             if let Err(e) = self.socket.send_to(&out_buf[..written], send_info.to).await {
-                error!("[SERVER] Error sending UDP packet to {}: {}", send_info.to, e);
+                error!(
+                    "[SERVER] Error sending UDP packet to {}: {}",
+                    send_info.to, e
+                );
             }
         }
 
@@ -244,7 +267,9 @@ impl QuicServer {
             // Send keep-alive PING if connection is established and has been idle
             if conn.is_established() {
                 if let Some(last_activity) = self.last_activity.get(&addr) {
-                    if last_activity.elapsed() >= keep_alive_interval && conn.send_ack_eliciting().is_ok() {
+                    if last_activity.elapsed() >= keep_alive_interval
+                        && conn.send_ack_eliciting().is_ok()
+                    {
                         // Update activity time to prevent immediate resending
                         self.last_activity.insert(addr, std::time::Instant::now());
                     }
@@ -257,19 +282,19 @@ impl QuicServer {
                     Ok(v) => v,
                     Err(quiche::Error::Done) => break,
                     Err(e) => {
-                        error!("[SERVER] Error sending timeout packet: {}", e);
+                        error!("[SERVER] Error sending timeout packet: {e}");
                         break;
                     }
                 };
 
                 if let Err(e) = self.socket.send_to(&out_buf[..written], send_info.to).await {
-                    error!("[SERVER] Error sending timeout UDP packet: {}", e);
+                    error!("[SERVER] Error sending timeout UDP packet: {e}");
                 }
             }
         }
 
         for addr in to_remove {
-            info!("[SERVER] Removing closed connection from {}", addr);
+            info!("[SERVER] Removing closed connection from {addr}");
             self.connections.remove(&addr);
             self.last_activity.remove(&addr);
         }
@@ -277,33 +302,43 @@ impl QuicServer {
         Ok(())
     }
 
-    async fn forward_tun_packet_via_datagram(&mut self, packet: &[u8], out_buf: &mut [u8; 1500]) -> std::io::Result<()> {
+    async fn forward_tun_packet_via_datagram(
+        &mut self,
+        packet: &[u8],
+        out_buf: &mut [u8; 1500],
+    ) -> std::io::Result<()> {
         let mut sent_any = false;
-        
+
         // Try to send via all established connections
         for (&addr, conn) in &mut self.connections {
             if conn.is_established() {
                 match conn.dgram_send(packet) {
                     Ok(_) => {
-                        info!("[SERVER] 📤 Forwarded {} bytes via DATAGRAM to {}", packet.len(), addr);
+                        info!(
+                            "[SERVER] 📤 Forwarded {} bytes via DATAGRAM to {}",
+                            packet.len(),
+                            addr
+                        );
                         sent_any = true;
-                        
+
                         // Update activity timestamp since we're sending data
                         self.last_activity.insert(addr, std::time::Instant::now());
-                        
+
                         // Send any resulting packets
                         loop {
                             let (written, send_info) = match conn.send(out_buf) {
                                 Ok(v) => v,
                                 Err(quiche::Error::Done) => break,
                                 Err(e) => {
-                                    error!("[SERVER] Error sending datagram packet: {}", e);
+                                    error!("[SERVER] Error sending datagram packet: {e}");
                                     break;
                                 }
                             };
 
-                            if let Err(e) = self.socket.send_to(&out_buf[..written], send_info.to).await {
-                                error!("[SERVER] Error sending UDP packet: {}", e);
+                            if let Err(e) =
+                                self.socket.send_to(&out_buf[..written], send_info.to).await
+                            {
+                                error!("[SERVER] Error sending UDP packet: {e}");
                             }
                         }
                     }
@@ -313,11 +348,11 @@ impl QuicServer {
                 }
             }
         }
-        
+
         if !sent_any {
             // No established connections available to forward packet
         }
-        
+
         Ok(())
     }
 }
@@ -334,14 +369,21 @@ pub struct QuicClient {
 }
 
 impl QuicClient {
-    pub async fn new(server_addr: SocketAddr, ca_cert: Option<&str>, client_cert: Option<&str>, client_key: Option<&str>, conn_id_len: u8) -> std::io::Result<Self> {
+    pub async fn new(
+        server_addr: SocketAddr,
+        ca_cert: Option<&str>,
+        client_cert: Option<&str>,
+        client_key: Option<&str>,
+        conn_id_len: u8,
+    ) -> std::io::Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        info!("QUIC client connecting to {}", server_addr);
+        info!("QUIC client connecting to {server_addr}");
 
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        config.set_application_protos(&[b"quicap"])
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let mut config =
+            quiche::Config::new(quiche::PROTOCOL_VERSION).map_err(std::io::Error::other)?;
+        config
+            .set_application_protos(&[b"quicap"])
+            .map_err(std::io::Error::other)?;
         config.set_max_idle_timeout(30000);
         config.set_max_recv_udp_payload_size(1400);
         config.set_max_send_udp_payload_size(1400);
@@ -352,35 +394,41 @@ impl QuicClient {
         config.set_initial_max_streams_uni(100);
         config.set_disable_active_migration(true);
         config.enable_dgram(true, 6000, 6000);
-        
+
         // Configure certificate verification
         if let Some(ca_path) = ca_cert {
             if let Err(e) = config.load_verify_locations_from_file(ca_path) {
-                warn!("Could not load CA certificate from {}: {}", ca_path, e);
-                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, 
-                    format!("CA certificate not found. Please ensure {} exists.", ca_path)));
+                warn!("Could not load CA certificate from {ca_path}: {e}");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("CA certificate not found. Please ensure {ca_path} exists."),
+                ));
             }
             config.verify_peer(true);
-            info!("Using CA certificate from {} for peer verification", ca_path);
+            info!("Using CA certificate from {ca_path} for peer verification");
         } else {
             config.verify_peer(false); // Allow cert errors when no CA is specified
             warn!("No CA certificate specified, disabling peer verification");
         }
-        
+
         // Configure client certificate for mutual TLS
         if let (Some(cert_path), Some(key_path)) = (client_cert, client_key) {
             if let Err(e) = config.load_cert_chain_from_pem_file(cert_path) {
-                warn!("Could not load client certificate from {}: {}", cert_path, e);
-                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, 
-                    format!("Client certificate not found. Please ensure {} exists.", cert_path)));
+                warn!("Could not load client certificate from {cert_path}: {e}");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Client certificate not found. Please ensure {cert_path} exists."),
+                ));
             }
-            
+
             if let Err(e) = config.load_priv_key_from_pem_file(key_path) {
-                warn!("Could not load client private key from {}: {}", key_path, e);
-                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, 
-                    format!("Client private key not found. Please ensure {} exists.", key_path)));
+                warn!("Could not load client private key from {key_path}: {e}");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Client private key not found. Please ensure {key_path} exists."),
+                ));
             }
-            
+
             info!("Configured client certificate for mutual TLS");
         } else {
             info!("No client certificate specified - using server-only TLS");
@@ -389,13 +437,14 @@ impl QuicClient {
         let mut scid = [0; quiche::MAX_CONN_ID_LEN];
         let scid_len = conn_id_len.min(quiche::MAX_CONN_ID_LEN as u8) as usize;
         // Generate a random SCID with lowercase letters only
-        scid.iter_mut().take(scid_len).for_each(|x| *x = b'a' + (rand::random::<u8>() % 26));
+        scid.iter_mut()
+            .take(scid_len)
+            .for_each(|x| *x = b'a' + (rand::random::<u8>() % 26));
         let scid = quiche::ConnectionId::from_ref(&scid[..scid_len]);
-        
+
         let local_addr = socket.local_addr()?;
         let connection = quiche::connect(None, &scid, local_addr, server_addr, &mut config)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-
+            .map_err(std::io::Error::other)?;
         Ok(Self {
             socket: Arc::new(socket),
             connection,
@@ -427,7 +476,9 @@ impl QuicClient {
 
         loop {
             // Get the next timeout from the connection, or use a default
-            let timeout_duration = self.connection.timeout()
+            let timeout_duration = self
+                .connection
+                .timeout()
                 .unwrap_or(Duration::from_millis(25));
 
             tokio::select! {
@@ -441,7 +492,7 @@ impl QuicClient {
                             }
                         }
                         Err(e) => {
-                            error!("Error receiving packet: {}", e);
+                            error!("Error receiving packet: {e}");
                         }
                     }
                 }
@@ -462,7 +513,7 @@ impl QuicClient {
                 // Handle connection timeouts and keep-alive pings
                 _ = time::sleep(timeout_duration) => {
                     self.handle_timeout(&mut out_buf).await?;
-                    
+
                     // Send keep-alive PING if we've been idle too long
                     if self.connection.is_established() && last_activity.elapsed() >= keep_alive_interval {
                         self.send_ping_frame(&mut out_buf).await?;
@@ -486,27 +537,33 @@ impl QuicClient {
                 Ok(v) => v,
                 Err(quiche::Error::Done) => break,
                 Err(e) => {
-                    error!("Error sending initial packet: {}", e);
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+                    error!("Error sending initial packet: {e}");
+                    return Err(std::io::Error::other(e));
                 }
             };
 
-            self.socket.send_to(&out_buf[..written], send_info.to).await?;
+            self.socket
+                .send_to(&out_buf[..written], send_info.to)
+                .await?;
         }
         Ok(())
     }
 
-    async fn handle_packet(&mut self, packet: &mut [u8], out_buf: &mut [u8; 1500]) -> std::io::Result<()> {
-        let recv_info = quiche::RecvInfo { 
+    async fn handle_packet(
+        &mut self,
+        packet: &mut [u8],
+        out_buf: &mut [u8; 1500],
+    ) -> std::io::Result<()> {
+        let recv_info = quiche::RecvInfo {
             to: self.socket.local_addr()?,
-            from: self.server_addr 
+            from: self.server_addr,
         };
-        
+
         match self.connection.recv(packet, recv_info) {
-            Ok(_) => {},
-            Err(quiche::Error::Done) => {},
+            Ok(_) => {}
+            Err(quiche::Error::Done) => {}
             Err(e) => {
-                error!("Error processing packet: {}", e);
+                error!("Error processing packet: {e}");
                 return Ok(());
             }
         }
@@ -521,20 +578,20 @@ impl QuicClient {
         loop {
             match self.connection.dgram_recv(&mut dgram_buf) {
                 Ok(len) => {
-                    info!("[CLIENT] 📨 Received DATAGRAM from server: {} bytes", len);
+                    info!("[CLIENT] 📨 Received DATAGRAM from server: {len} bytes");
                     if self.tun_injector.is_some() {
                         // Inject datagram into TUN device
                         if let Some(ref tun_injector) = self.tun_injector {
                             let packet = dgram_buf[..len].to_vec();
                             if let Err(e) = tun_injector.send(packet).await {
-                                error!("[CLIENT] Failed to inject packet into TUN: {}", e);
+                                error!("[CLIENT] Failed to inject packet into TUN: {e}");
                             }
                         }
                     }
                 }
                 Err(quiche::Error::Done) => break,
                 Err(e) => {
-                    error!("Error receiving datagram: {}", e);
+                    error!("Error receiving datagram: {e}");
                     break;
                 }
             }
@@ -546,12 +603,14 @@ impl QuicClient {
                 Ok(v) => v,
                 Err(quiche::Error::Done) => break,
                 Err(e) => {
-                    error!("Error sending packet: {}", e);
+                    error!("Error sending packet: {e}");
                     break;
                 }
             };
 
-            self.socket.send_to(&out_buf[..written], send_info.to).await?;
+            self.socket
+                .send_to(&out_buf[..written], send_info.to)
+                .await?;
         }
 
         Ok(())
@@ -561,19 +620,21 @@ impl QuicClient {
         match self.connection.send_ack_eliciting() {
             Ok(_) => {
                 info!("🏓 Sent PING frame to server");
-                
+
                 // Send any resulting packets containing the PING frame
                 loop {
                     let (written, send_info) = match self.connection.send(out_buf) {
                         Ok(v) => v,
                         Err(quiche::Error::Done) => break,
                         Err(e) => {
-                            error!("Error sending PING packet: {}", e);
+                            error!("Error sending PING packet: {e}");
                             break;
                         }
                     };
 
-                    self.socket.send_to(&out_buf[..written], send_info.to).await?;
+                    self.socket
+                        .send_to(&out_buf[..written], send_info.to)
+                        .await?;
                 }
             }
             Err(_) => {
@@ -594,36 +655,47 @@ impl QuicClient {
                     Ok(v) => v,
                     Err(quiche::Error::Done) => break,
                     Err(e) => {
-                        error!("Error sending timeout packet: {}", e);
+                        error!("Error sending timeout packet: {e}");
                         break;
                     }
                 };
 
-                self.socket.send_to(&out_buf[..written], send_info.to).await?;
+                self.socket
+                    .send_to(&out_buf[..written], send_info.to)
+                    .await?;
             }
         }
 
         Ok(())
     }
 
-    async fn forward_tun_packet_via_datagram(&mut self, packet: &[u8], out_buf: &mut [u8; 1500]) -> std::io::Result<()> {
+    async fn forward_tun_packet_via_datagram(
+        &mut self,
+        packet: &[u8],
+        out_buf: &mut [u8; 1500],
+    ) -> std::io::Result<()> {
         if self.connection.is_established() {
             match self.connection.dgram_send(packet) {
                 Ok(_) => {
-                    info!("[CLIENT] 📤 Forwarded {} bytes via DATAGRAM to server", packet.len());
-                    
+                    info!(
+                        "[CLIENT] 📤 Forwarded {} bytes via DATAGRAM to server",
+                        packet.len()
+                    );
+
                     // Send any resulting packets
                     loop {
                         let (written, send_info) = match self.connection.send(out_buf) {
                             Ok(v) => v,
                             Err(quiche::Error::Done) => break,
                             Err(e) => {
-                                error!("[CLIENT] Error sending datagram packet: {}", e);
+                                error!("[CLIENT] Error sending datagram packet: {e}");
                                 break;
                             }
                         };
 
-                        self.socket.send_to(&out_buf[..written], send_info.to).await?;
+                        self.socket
+                            .send_to(&out_buf[..written], send_info.to)
+                            .await?;
                     }
                 }
                 Err(_) => {
@@ -633,7 +705,7 @@ impl QuicClient {
         } else {
             // Connection not established, cannot forward packet
         }
-        
+
         Ok(())
     }
 }
