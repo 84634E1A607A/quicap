@@ -21,4 +21,20 @@ pub struct Config {
     /// Enable verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Listen IP address for server
+    #[arg(long, default_value = "127.0.0.1")]
+    pub listen_ip: Ipv4Addr,
+    
+    /// Listen port for server
+    #[arg(long, default_value = "4433")]
+    pub listen_port: u16,
+    
+    /// Target server IP address for client
+    #[arg(long, default_value = "127.0.0.1")]
+    pub target_ip: Ipv4Addr,
+    
+    /// Target server port for client
+    #[arg(long, default_value = "4434")]
+    pub target_port: u16,
 }

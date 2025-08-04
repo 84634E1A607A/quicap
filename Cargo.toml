@@ -8,5 +8,6 @@ clap = { version = "4", features = ["derive"] }
 env_logger = "0.11.8"
 log = { version = "0.4", features = ["max_level_debug"] }
 quiche = "0.24"
+rand = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "sync"] }
 tokio-tun = "0.14"
