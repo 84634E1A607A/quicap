@@ -1,5 +1,5 @@
-use std::net::Ipv4Addr;
 use clap::Parser;
+use std::net::Ipv4Addr;
 
 #[derive(Debug, Parser)]
 #[command(name = "quicap")]
@@ -21,19 +21,19 @@ pub struct Config {
     /// Listen IP address for server
     #[arg(long, default_value = "127.0.0.1")]
     pub listen_ip: Ipv4Addr,
-    
+
     /// Listen port for server
     #[arg(long, default_value = "4433")]
     pub listen_port: u16,
-    
+
     /// Target server IP address for client
     #[arg(long, default_value = "127.0.0.1")]
     pub target_ip: Ipv4Addr,
-    
+
     /// Target server port for client
     #[arg(long, default_value = "4433")]
     pub target_port: u16,
-    
+
     /// Path to certificate file (used for both client and server)
     #[arg(long, default_value = "certs/server.crt")]
     pub cert_file: String,
@@ -45,11 +45,11 @@ pub struct Config {
     /// Path to CA certificate file for client trust verification
     #[arg(long, default_value = "certs/ca.crt")]
     pub ca_cert: Option<String>,
-    
+
     /// Connection ID length (4-20 bytes)
     #[arg(long, default_value = "16", value_parser = validate_conn_id_len)]
     pub conn_id_len: u8,
-    
+
     /// Disable QUIC client mode (server only)
     #[arg(long)]
     pub server_only: bool,
@@ -68,7 +68,9 @@ pub struct Config {
 }
 
 fn validate_conn_id_len(s: &str) -> Result<u8, String> {
-    let len: u8 = s.parse().map_err(|_| "Connection ID length must be a number")?;
+    let len: u8 = s
+        .parse()
+        .map_err(|_| "Connection ID length must be a number")?;
     if !(4..=20).contains(&len) {
         return Err("Connection ID length must be between 4 and 20 bytes".to_string());
     }

@@ -1,9 +1,9 @@
-use log::{error, info};
 use std::io;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_tun::{Tun, TunBuilder};
+use tracing::{error, info};
 
 #[derive(Clone)]
 pub struct TunDevice {

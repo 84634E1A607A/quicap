@@ -1,4 +1,3 @@
-use log::{error, info, warn};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -6,6 +5,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time;
+use tracing::{error, info, warn};
 
 pub struct QuicServer {
     socket: Arc<UdpSocket>,

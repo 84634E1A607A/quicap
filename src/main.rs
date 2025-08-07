@@ -1,27 +1,28 @@
 mod args;
-mod tun_device;
 mod quic;
+mod tun_device;
 
 use args::Config;
-use tun_device::TunDevice;
-use quic::{QuicServer, QuicClient};
 use clap::Parser;
-use log::{info, debug, error, warn};
+use quic::{QuicClient, QuicServer};
 use std::time::Duration;
+use tracing::{debug, error, info, warn};
+use tun_device::TunDevice;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Use env_logger for logging at DEBUG
     #[cfg(debug_assertions)]
-    env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Debug)
-        .init();
-
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::DEBUG.into())
+        .from_env()?;
     #[cfg(not(debug_assertions))]
-    env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Warn)
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
+        .from_env()?;
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .compact()
         .init();
-    
     let config = Config::parse();
 
     debug!("Configuration: {config:?}");
@@ -32,14 +33,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (server_rx_tx, server_rx_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
 
     // Start TUN device in background
-    let mut tun_device = match TunDevice::new(&config.tun_name, config.tun_ip, config.tun_netmask).await {
-        Ok(device) => device,
-        Err(e) => {
-            error!("Failed to create TUN device: {e}");
-            error!("Note: You may need to run this program with sudo privileges");
-            return Err(e.into());
-        }
-    };
+    let mut tun_device =
+        match TunDevice::new(&config.tun_name, config.tun_ip, config.tun_netmask).await {
+            Ok(device) => device,
+            Err(e) => {
+                error!("Failed to create TUN device: {e}");
+                error!("Note: You may need to run this program with sudo privileges");
+                return Err(e.into());
+            }
+        };
 
     // Set up packet forwarding from TUN to QUIC
     tun_device.set_packet_forwarder(tun_to_quic_tx.clone());
@@ -60,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start QUIC mode based on configuration
     let listen_addr = std::net::SocketAddr::new(config.listen_ip.into(), config.listen_port);
     let target_addr = std::net::SocketAddr::new(config.target_ip.into(), config.target_port);
-    
+
     if config.server_only {
         info!("🚀 Starting QUIC in server-only mode");
         info!("   Server listening on: {listen_addr}");
@@ -69,10 +71,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("   Server listening on: {listen_addr}");
         info!("   Client connecting to: {target_addr}");
     }
-    
+
     // Start server in background
     let server_task = {
-        let mut server = QuicServer::new(listen_addr, &config.cert_file, &config.key_file, config.ca_cert.as_deref(), config.conn_id_len).await?;
+        let mut server = QuicServer::new(
+            listen_addr,
+            &config.cert_file,
+            &config.key_file,
+            config.ca_cert.as_deref(),
+            config.conn_id_len,
+        )
+        .await?;
         server.set_tun_injector(tun_injector.clone());
         server.set_packet_receiver(server_rx_rx);
         tokio::spawn(async move {
@@ -81,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
     };
-    
+
     // Start client in background (only if not server-only mode)
     let client_task = if !config.server_only {
         let target_addr_clone = target_addr;
@@ -93,12 +102,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let max_retry_delay = Duration::from_secs(config.max_retry_delay);
         let auto_retry = config.no_client_auto_retry;
         let max_retries = config.client_max_retries;
-        
+
         Some(tokio::spawn(async move {
             let mut retry_count = 0;
             let mut retry_delay = Duration::from_secs(1); // Start with 1 second delay
             let mut packet_rx = Some(client_rx_rx);
-            
+
             loop {
                 // Create a new client instance for each attempt
                 match QuicClient::new(
@@ -106,38 +115,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ca_cert_clone.as_deref(),
                     Some(client_cert_clone.as_str()),
                     Some(client_key_clone.as_str()),
-                    conn_id_len
-                ).await {
+                    conn_id_len,
+                )
+                .await
+                {
                     Ok(mut client) => {
                         client.set_tun_injector(tun_injector_clone.clone());
                         if let Some(rx) = packet_rx.take() {
                             client.set_packet_receiver(rx);
                         }
-                        
+
                         if retry_count > 0 {
                             info!("🔄 Client reconnected successfully after {retry_count} retries");
                         }
-                        
+
                         // Run the client
                         match client.run().await {
                             Err(e) => {
                                 error!("Client error: {e}");
-                                
+
                                 if !auto_retry {
                                     error!("Auto-retry disabled, client will not reconnect");
                                     break;
                                 }
-                                
+
                                 retry_count += 1;
-                                
+
                                 if max_retries > 0 && retry_count > max_retries {
-                                    error!("Maximum retry attempts ({max_retries}) exceeded, giving up");
+                                    error!(
+                                        "Maximum retry attempts ({max_retries}) exceeded, giving up"
+                                    );
                                     break;
                                 }
-                                
-                                warn!("🔄 Client connection failed (attempt {retry_count}), retrying in {retry_delay:?}...");
+
+                                warn!(
+                                    "🔄 Client connection failed (attempt {retry_count}), retrying in {retry_delay:?}..."
+                                );
                                 tokio::time::sleep(retry_delay).await;
-                                
+
                                 // Exponential backoff with jitter, max MAX_RETRY_DELAY
                                 retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
                             }
@@ -146,12 +161,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if auto_retry {
                                     warn!("Client connection closed, attempting to reconnect...");
                                     retry_count += 1;
-                                    
+
                                     if max_retries > 0 && retry_count > max_retries {
-                                        error!("Maximum retry attempts ({max_retries}) exceeded, giving up");
+                                        error!(
+                                            "Maximum retry attempts ({max_retries}) exceeded, giving up"
+                                        );
                                         break;
                                     }
-                                    
+
                                     tokio::time::sleep(retry_delay).await;
                                     retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
                                 } else {
@@ -162,19 +179,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Err(e) => {
                         error!("Failed to create client: {e}");
-                        
+
                         if !auto_retry {
                             break;
                         }
-                        
+
                         retry_count += 1;
-                        
+
                         if max_retries > 0 && retry_count > max_retries {
                             error!("Maximum retry attempts ({max_retries}) exceeded, giving up");
                             break;
                         }
-                        
-                        warn!("🔄 Client creation failed (attempt {retry_count}), retrying in {retry_delay:?}...");
+
+                        warn!(
+                            "🔄 Client creation failed (attempt {retry_count}), retrying in {retry_delay:?}..."
+                        );
                         tokio::time::sleep(retry_delay).await;
                         retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
                     }
@@ -191,7 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let server_tx = server_rx_tx;
         let mut tun_rx = tun_to_quic_rx;
         let server_only = config.server_only;
-        
+
         tokio::spawn(async move {
             while let Some(packet) = tun_rx.recv().await {
                 if server_only {
@@ -217,7 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
     };
-    
+
     // Wait for all tasks to complete (they should run indefinitely)
     if let Some(client_task) = client_task {
         tokio::select! {

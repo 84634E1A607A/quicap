@@ -1,13 +1,20 @@
 [package]
+authors = ["Ajax Dong <i@aajax.top>", "adamanteye <ada@adamanteye.cc>"]
+edition = "2024"
 name = "quicap"
 version = "0.1.0"
-edition = "2024"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-env_logger = "0.11.8"
-log = { version = "0.4", features = ["max_level_debug"] }
+clap = { features = ["derive"], version = "4" }
 quiche = "0.24"
 rand = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "sync"] }
+tokio = { features = [
+    "io-util",
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+], version = "1" }
 tokio-tun = "0.14"
+tracing = "0.1"
+tracing-subscriber = { features = ["env-filter"], version = "0.3" }
