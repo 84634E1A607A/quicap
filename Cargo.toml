@@ -1,12 +1,31 @@
 [package]
+authors = ["Ajax Dong <i@aajax.top>", "adamanteye <ada@adamanteye.cc>"]
+description = "A QUIC-based L2 tunnel."
+edition = "2024"
 name = "quicap"
 version = "0.1.0"
-edition = "2024"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-env_logger = "0.11.8"
-log = { version = "0.4", features = ["max_level_debug"] }
-quiche = "0.24"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "sync"] }
-tokio-tun = "0.14"
+clap = { default-features = false, features = [
+    "derive",
+    "help",
+    "std",
+    "usage",
+], version = "4" }
+env_logger = { default-features = true, version = "0.11" }
+log = "0.4"
+quinn = { default-features = false, features = ["rustls"], version = "0.11" }
+serde = { default-features = false, features = [
+    "derive",
+    "std",
+], version = "1" }
+tokio = { features = ["sync", "time"], version = "1" }
+tokio-uring = { default-features = false, features = [
+    "bytes",
+], version = "0.5" }
+toml = { default-features = false, features = [
+    "parse",
+    "serde",
+    "std",
+], version = "0.9" }
+tun-rs = { default-features = false, features = ["async"], version = "2" }

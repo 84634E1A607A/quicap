@@ -1,14 +1,14 @@
 use log::{debug, error, info, warn};
 use std::io;
 use std::net::Ipv4Addr;
-use tokio::sync::mpsc::{self, Sender, Receiver};
-use tokio_tun::{Tun, TunBuilder};
 use std::sync::Arc;
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio_tun::{Tun, TunBuilder};
 
 #[derive(Clone)]
 pub struct TunDevice {
     name: String,
-    rx_tun: Arc<Tun>, // for receiving
+    rx_tun: Arc<Tun>,    // for receiving
     tx: Sender<Vec<u8>>, // channel to send write packets
 }
 
@@ -20,14 +20,15 @@ impl TunDevice {
             .netmask(netmask)
             .up()
             .build()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
-        let tun = Arc::new(tuns.pop().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "Failed to create TUN interface")
-        })?);
+        let tun = Arc::new(
+            tuns.pop()
+                .ok_or_else(|| io::Error::other("Failed to create TUN interface"))?,
+        );
 
         let rx_tun = tun.clone(); // for reading
-        let tx_tun = tun;     // for writing
+        let tx_tun = tun; // for writing
 
         let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(1024);
 
@@ -52,7 +53,7 @@ impl TunDevice {
                 info!("Injecting ping request to 172.30.12.5...");
                 let ping_packet = create_ping_packet();
                 if let Err(e) = tx.send(ping_packet).await {
-                    error!("Failed to inject ping packet: {}", e);
+                    error!("Failed to inject ping packet: {e}");
                 }
             }
         });
@@ -63,14 +64,14 @@ impl TunDevice {
             match self.rx_tun.recv(&mut buffer).await {
                 Ok(n) => {
                     if verbose {
-                        debug!("Received {} bytes:", n);
+                        debug!("Received {n} bytes:");
                         print_packet_hex(&buffer[..n]);
                     }
 
                     self.parse_and_print_packet(&buffer[..n]).await;
                 }
                 Err(e) => {
-                    error!("Error reading from TUN: {}", e);
+                    error!("Error reading from TUN: {e}");
                     break;
                 }
             }
@@ -104,7 +105,7 @@ impl TunDevice {
             1 => self.parse_icmp_packet(packet, ihl as usize).await,
             6 => self.parse_tcp_packet(packet, ihl as usize).await,
             17 => self.parse_udp_packet(packet, ihl as usize).await,
-            _ => info!("   Unknown protocol: {}", protocol),
+            _ => info!("   Unknown protocol: {protocol}"),
         }
     }
 
@@ -117,9 +118,9 @@ impl TunDevice {
         let icmp_code = packet[ip_header_len + 1];
 
         match icmp_type {
-            8 => info!("   🏓 ICMP Echo Request (Ping) - Code: {}", icmp_code),
-            0 => info!("   🏓 ICMP Echo Reply (Pong) - Code: {}", icmp_code),
-            _ => info!("   🔔 ICMP Type: {}, Code: {}", icmp_type, icmp_code),
+            8 => info!("   🏓 ICMP Echo Request (Ping) - Code: {icmp_code}"),
+            0 => info!("   🏓 ICMP Echo Reply (Pong) - Code: {icmp_code}"),
+            _ => info!("   🔔 ICMP Type: {icmp_type}, Code: {icmp_code}"),
         }
     }
 
@@ -165,10 +166,7 @@ impl TunDevice {
         let dst_port = u16::from_be_bytes([packet[ip_header_len + 2], packet[ip_header_len + 3]]);
         let length = u16::from_be_bytes([packet[ip_header_len + 4], packet[ip_header_len + 5]]);
 
-        info!(
-            "   📡 UDP: {}:{} -> {}:{} (Length: {})",
-            src_port, dst_port, src_port, dst_port, length
-        );
+        info!("   📡 UDP: {src_port}:{dst_port} -> {src_port}:{dst_port} (Length: {length})");
     }
 }
 
@@ -177,8 +175,8 @@ async fn writer_loop(tun: Arc<Tun>, mut rx: Receiver<Vec<u8>>) {
     while let Some(packet) = rx.recv().await {
         print_packet_hex(&packet);
         match tun.send(&packet).await {
-            Ok(n) => debug!("Wrote {} bytes to TUN", n),
-            Err(e) => error!("Failed to write to TUN: {}", e),
+            Ok(n) => debug!("Wrote {n} bytes to TUN"),
+            Err(e) => error!("Failed to write to TUN: {e}"),
         }
     }
 }
@@ -188,7 +186,7 @@ fn print_packet_hex(packet: &[u8]) {
         print!("{:04x}: ", i * 16);
 
         for (j, byte) in chunk.iter().enumerate() {
-            print!("{:02x} ", byte);
+            print!("{byte:02x} ");
             if j == 7 {
                 print!(" ");
             }

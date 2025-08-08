@@ -1,24 +1,43 @@
-use std::net::Ipv4Addr;
 use clap::Parser;
+use core::net::SocketAddr;
+use serde::Deserialize;
 
 #[derive(Debug, Parser)]
-#[command(name = "quicap")]
-#[command(about = "A QUIC-based packet capture tool using TUN interface")]
-#[command(version)]
-pub struct Config {
-    /// TUN interface IP address
-    #[arg(short = 'i', long = "ip", default_value = "10.20.30.40")]
-    pub tun_ip: Ipv4Addr,
+#[command(version, about)]
+pub(super) struct Args {
+    #[arg(short, long, default_value = "/etc/quicap/quicap.toml")]
+    pub config: String,
+}
 
-    /// TUN interface netmask
-    #[arg(short = 'n', long = "netmask", default_value = "255.255.255.252")]
-    pub tun_netmask: Ipv4Addr,
+#[cfg_attr(test, derive(Debug, PartialEq))]
+#[derive(Deserialize)]
+pub(super) struct Config {
+    pub name: String,
+    pub listen: SocketAddr,
+    pub ipv4: Option<String>,
+    pub ipv6: Option<String>,
+}
 
-    /// TUN interface name
-    #[arg(long = "name", default_value = "quicap0")]
-    pub tun_name: String,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddrV4};
 
-    /// Enable verbose output
-    #[arg(short, long)]
-    pub verbose: bool,
+    #[test]
+    fn deserialize_configuration() {
+        let toml = r#"
+            name = "quicap"
+            listen = "10.0.0.1:8000"
+            ipv4 = "10.0.0.2/16"
+            ipv6 = "fe80::6a08/64"
+        "#;
+        let toml: Config = toml::from_str(toml).unwrap();
+        let config = Config {
+            name: "quicap".to_string(),
+            listen: std::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 8000)),
+            ipv4: Some("10.0.0.2/16".to_string()),
+            ipv6: Some("fe80::6a08/64".to_string()),
+        };
+        assert_eq!(toml, config);
+    }
 }
