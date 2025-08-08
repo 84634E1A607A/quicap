@@ -12,20 +12,21 @@ clap = { default-features = false, features = [
     "std",
     "usage",
 ], version = "4" }
+compio = { default-features = false, features = [
+    "io-uring",
+    "macros",
+    "quic",
+    "runtime",
+], version = "0.15" }
 env_logger = { default-features = true, version = "0.11" }
 log = "0.4"
-quinn = { default-features = false, features = ["rustls"], version = "0.11" }
 serde = { default-features = false, features = [
     "derive",
     "std",
 ], version = "1" }
-tokio = { features = ["sync", "time"], version = "1" }
-tokio-uring = { default-features = false, features = [
-    "bytes",
-], version = "0.5" }
 toml = { default-features = false, features = [
     "parse",
     "serde",
     "std",
 ], version = "0.9" }
-tun-rs = { default-features = false, features = ["async"], version = "2" }
+tun-rs = { default-features = false, version = "2" }

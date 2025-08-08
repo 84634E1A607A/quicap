@@ -1,44 +1,50 @@
-use core::net::SocketAddr;
-use std::os::fd::{AsRawFd, FromRawFd};
-
-use tokio_uring::{fs::File, net::UdpSocket};
-use tun_rs::{AsyncDevice, DeviceBuilder};
+use compio::fs::AsyncFd;
+use tun_rs::{DeviceBuilder, SyncDevice};
 
 use super::Config;
 
-pub(super) struct TapBuilder {
-    config: Config,
+pub struct TapBuilder {
+    name: String,
+    ipv4: Option<String>,
+    ipv6: Option<String>,
 }
 
-pub(super) struct TapInterface {
-    dev: AsyncDevice,
-    listen: SocketAddr,
+pub struct TapInterface {
+    inner: SyncDevice,
 }
 
-pub(super) struct TapHandle {
-    fd: File,
-    socket: UdpSocket,
+pub struct TapHandle {
+    inner: AsyncFd<SyncDevice>,
 }
 
 impl TapBuilder {
-    pub fn with_config(config: Config) -> Self {
-        Self { config }
+    pub fn with_config(config: &Config) -> Self {
+        Self {
+            name: config.name.clone(),
+            ipv4: config.ipv4.clone(),
+            ipv6: config.ipv6.clone(),
+        }
     }
     pub fn build(self) -> Result<TapInterface, Box<dyn std::error::Error>> {
-        let name = self.config.name;
-        let dev = DeviceBuilder::new().name(name);
-        let listen = self.config.listen;
-        let dev = if let Some(ipv4) = self.config.ipv4 {
+        let name = self.name;
+        let inner = DeviceBuilder::new().name(name);
+        if self.ipv4.is_none() && self.ipv6.is_none() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "at least one address must be specified",
+            ))?
+        }
+        let dev = if let Some(ipv4) = self.ipv4 {
             let ipv4: Vec<&str> = ipv4.split('/').collect();
-            dev.ipv4(
+            inner.ipv4(
                 ipv4.first().unwrap().to_string(),
                 ipv4.last().map_or(32, |s| s.parse::<u8>().unwrap()),
                 None,
             )
         } else {
-            dev
+            inner
         };
-        let dev = if let Some(ipv6) = self.config.ipv6 {
+        let dev = if let Some(ipv6) = self.ipv6 {
             let ipv6: Vec<&str> = ipv6.split('/').collect();
             dev.ipv6(
                 ipv6.first().unwrap().to_string(),
@@ -47,39 +53,25 @@ impl TapBuilder {
         } else {
             dev
         };
-        let dev = dev
+        let inner = dev
             .enable(false)
             .mtu(1400)
             .layer(tun_rs::Layer::L2)
-            .build_async()?;
-        Ok(TapInterface { dev, listen })
+            .build_sync()?;
+        Ok(TapInterface { inner })
     }
 }
 
 impl TapInterface {
     pub fn name(&self) -> Result<String, Box<dyn std::error::Error>> {
-        Ok(self.dev.name()?)
+        Ok(self.inner.name()?)
     }
     pub fn enable(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.dev.enabled(true)?;
+        self.inner.enabled(true)?;
         Ok(())
     }
     pub fn disable(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.dev.enabled(false)?;
+        self.inner.enabled(false)?;
         Ok(())
-    }
-    pub fn into_handle(self) -> Result<TapHandle, Box<dyn std::error::Error>> {
-        let fd = self.dev.as_raw_fd();
-        let file = unsafe { File::from_raw_fd(fd) };
-        let socket = std::net::UdpSocket::bind(self.listen)?;
-        socket.set_nonblocking(true)?;
-        let socket = UdpSocket::from_std(socket);
-        Ok(TapHandle { fd: file, socket })
-    }
-    pub fn from_handle(handle: TapHandle) -> Result<Self, Box<dyn std::error::Error>> {
-        let fd = handle.fd.as_raw_fd();
-        let dev = unsafe { AsyncDevice::from_raw_fd(fd) };
-        let listen = handle.socket.local_addr()?;
-        Ok(TapInterface { dev, listen })
     }
 }
