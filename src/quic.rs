@@ -1,27 +1,34 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::Path};
 
 use compio::net::UdpSocket;
-use compio::quic;
+use compio::quic::{self, ClientConfig, Endpoint, ServerConfig};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
 use super::Config;
 
-pub struct QuicBuilder {
+pub struct QuicBuilder<'a> {
     listen: SocketAddr,
     peer: SocketAddr,
+    root: Option<&'a Path>,
+    cert: &'a Path,
+    key: &'a Path,
 }
 
-impl QuicBuilder {
-    pub fn with_config(config: &Config) -> Result<Self, Box<dyn std::error::Error>> {
+impl<'a> QuicBuilder<'a> {
+    pub fn with_config(config: &'a Config) -> Result<Self, Box<dyn std::error::Error>> {
         let listen = config.listen;
         let peer = config.peer;
-        Ok(Self { listen, peer })
+        let cert = config.crt.as_path();
+        let key = config.key.as_path();
+        let root = config.root.as_deref();
+        Ok(Self {
+            listen,
+            peer,
+            cert,
+            key,
+            root,
+        })
     }
-    // pub async fn build(self) -> Result<Quic, Box<dyn std::error::Error>> {
-    //     let listen = UdpSocket::bind(self.listen).await?;
-    //     let peer = UdpSocket::bind(self.peer).await?;
-    //     let peer = quic::Endpoint::new(peer, config, server_config, default_client_config);
-    //     Ok(Quic { listen, peer })
-    // }
 }
 
 pub struct Quic {
