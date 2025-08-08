@@ -17,11 +17,13 @@ compio = { default-features = false, features = [
     "macros",
     "quic",
     "runtime",
+    "rustls",
 ], version = "0.15" }
 env_logger = { default-features = true, version = "0.11" }
 log = "0.4"
-rustls = { default-features = false, version = "0.23" }
-rustls-platform-verifier = "0.5"
+quinn-proto = { default-features = false, features = [
+    "rustls",
+], version = "0.11" }
 serde = { default-features = false, features = [
     "derive",
     "std",

@@ -24,7 +24,8 @@ pub struct Config {
     pub crt: PathBuf,
     #[serde(default = "default_key")]
     pub key: PathBuf,
-    pub root: Option<PathBuf>,
+    #[serde(default = "default_ca_crt")]
+    pub ca_crt: PathBuf,
 }
 
 fn default_listen() -> SocketAddr {
@@ -36,11 +37,15 @@ fn default_peer() -> SocketAddr {
 }
 
 fn default_crt() -> PathBuf {
-    PathBuf::from("/cert/tls.crt")
+    PathBuf::from("/etc/quicap/crt.pem")
 }
 
 fn default_key() -> PathBuf {
-    PathBuf::from("/cert/tls.key")
+    PathBuf::from("/etc/quicap/key.pem")
+}
+
+fn default_ca_crt() -> PathBuf {
+    PathBuf::from("/etc/quicap/ca_crt.pem")
 }
 
 #[cfg(test)]
@@ -56,8 +61,9 @@ mod tests {
             peer = "10.0.0.3:8001"
             ipv4 = "10.0.0.2/16"
             ipv6 = "fe80::6a08/64"
-            crt = "/cert/tls.crt"
-            key = "/cert/tls.key"
+            crt = "/etc/quicap/crt.pem"
+            key = "/etc/quicap/key.pem"
+            ca_crt = "/etc/quicap/ca_crt.pem"
         "#;
         let toml: Config = toml::from_str(toml).unwrap();
         let config = Config {
@@ -66,9 +72,9 @@ mod tests {
             ipv4: Some("10.0.0.2/16".to_string()),
             ipv6: Some("fe80::6a08/64".to_string()),
             peer: std::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 3), 8001)),
-            crt: PathBuf::from("/cert/tls.crt"),
-            key: PathBuf::from("/cert/tls.key"),
-            root: None,
+            crt: PathBuf::from("/etc/quicap/crt.pem"),
+            key: PathBuf::from("/etc/quicap/key.pem"),
+            ca_crt: PathBuf::from("/etc/quicap/ca_crt.pem"),
         };
         assert_eq!(toml, config);
     }
