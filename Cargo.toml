@@ -2,6 +2,7 @@
 authors = ["Ajax Dong <i@aajax.top>", "adamanteye <ada@adamanteye.cc>"]
 description = "A QUIC-based L2 tunnel."
 edition = "2024"
+license = "GPL-3.0"
 name = "quicap"
 version = "0.1.0"
 
@@ -16,8 +17,10 @@ compio = { default-features = false, features = [
     "io-uring",
     "macros",
     "quic",
+    "ring",
     "runtime",
     "rustls",
+    "time",
 ], version = "0.15" }
 env_logger = { default-features = true, version = "0.11" }
 log = "0.4"
@@ -34,3 +37,9 @@ toml = { default-features = false, features = [
     "std",
 ], version = "0.9" }
 tun-rs = { default-features = false, version = "2" }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"

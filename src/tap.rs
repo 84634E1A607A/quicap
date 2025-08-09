@@ -1,4 +1,12 @@
-use compio::fs::AsyncFd;
+use compio::{
+    BufResult,
+    buf::{
+        IntoInner,
+        bytes::{Bytes, BytesMut},
+    },
+    fs::AsyncFd,
+    io::{AsyncRead, AsyncWrite},
+};
 use tun_rs::{DeviceBuilder, SyncDevice};
 
 use super::Config;
@@ -67,44 +75,52 @@ impl TapInterface {
         Ok(self.inner.name()?)
     }
     pub fn enable(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.inner.enabled(true)?;
-        Ok(())
+        Ok(self.inner.enabled(true)?)
     }
     pub fn disable(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.inner.enabled(false)?;
-        Ok(())
+        Ok(self.inner.enabled(false)?)
+    }
+    pub fn set_mtu(&mut self, mtu: u16) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(self.inner.set_mtu(mtu)?)
+    }
+}
+
+impl TryFrom<TapInterface> for TapHandle {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(tap: TapInterface) -> Result<Self, Self::Error> {
+        let inner = AsyncFd::new(tap.inner)?;
+        Ok(TapHandle { inner })
+    }
+}
+
+impl TapHandle {
+    pub async fn recv(&mut self, buf: BytesMut) -> BufResult<usize, BytesMut> {
+        self.inner.read(buf).await
+    }
+    pub async fn send(&mut self, buf: Bytes) -> BufResult<usize, Bytes> {
+        self.inner.write(buf).await
+    }
+}
+
+impl TryFrom<TapHandle> for TapInterface {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(handle: TapHandle) -> Result<Self, Self::Error> {
+        let inner = handle.inner.into_inner().try_unwrap().map_err(|e| {
+            drop(e);
+            Box::new(std::io::Error::other(
+                "failed to unwrap TapHandle".to_string(),
+            ))
+        })?;
+        Ok(TapInterface { inner })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use compio::net::UdpSocket;
-    use std::{
-        net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-        path::PathBuf,
-    };
-
-    fn default_config() -> Config {
-        Config {
-            name: "quicap0".into(),
-            ipv4: Some("192.0.2.1/24".into()),
-            ipv6: None,
-            peer: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 1234)),
-            listen: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 1234)),
-            crt: PathBuf::from("/etc/quicap/crt.pem"),
-            key: PathBuf::from("/etc/quicap/key.pem"),
-            ca_crt: PathBuf::from("/etc/quicap/ca.crt"),
-        }
-    }
-
-    fn default_tap() -> TapInterface {
-        let config = default_config();
-        let mut tap = TapBuilder::with_config(&config).build().unwrap();
-        tap.enable().unwrap();
-        tap.inner.set_mtu(1400).unwrap();
-        tap
-    }
+    use crate::tests_common::*;
 
     #[compio::test]
     async fn alter_tap() {
@@ -118,7 +134,7 @@ mod tests {
 
     #[compio::test]
     async fn send_to_and_recv_from_tap() {
-        let tap = default_tap();
+        let mut tap = TapHandle::try_from(default_tap()).unwrap();
         let mac = tap.inner.mac_address().unwrap();
         let peer_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
         // construct an arp request raw packet
@@ -141,9 +157,12 @@ mod tests {
         arp_packet.extend_from_slice(&[192, 0, 2, 2]); // sender IP address
         arp_packet.extend_from_slice(&[0xff; 6]); // target MAC address
         arp_packet.extend_from_slice(&[192, 0, 2, 1]); // target IP address
-        tap.inner.send(&arp_packet).unwrap();
-        let mut buf = [0u8; 100];
-        tap.inner.recv(&mut buf).unwrap();
+        let len = arp_packet.len();
+        let bytes = Bytes::from(arp_packet);
+        let (result, _) = tap.send(bytes).await.unwrap();
+        assert_eq!(len, result);
+        let buf = BytesMut::with_capacity(1500);
+        let (_, buf) = tap.recv(buf).await.unwrap();
         assert_eq!(&buf[22..28], &mac);
         assert_eq!(&buf[0..6], &peer_mac);
     }

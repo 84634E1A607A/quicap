@@ -26,6 +26,12 @@ pub struct Config {
     pub key: PathBuf,
     #[serde(default = "default_ca_crt")]
     pub ca_crt: PathBuf,
+    #[serde(default = "default_san")]
+    pub san: String,
+}
+
+fn default_san() -> String {
+    "node.quicap.local".into()
 }
 
 fn default_listen() -> SocketAddr {
@@ -75,6 +81,7 @@ mod tests {
             crt: PathBuf::from("/etc/quicap/crt.pem"),
             key: PathBuf::from("/etc/quicap/key.pem"),
             ca_crt: PathBuf::from("/etc/quicap/ca_crt.pem"),
+            san: "node.quicap.local".into(),
         };
         assert_eq!(toml, config);
     }
