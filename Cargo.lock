@@ -1067,6 +1067,8 @@ dependencies = [
  "clap",
  "compio",
  "env_logger",
+ "futures-channel",
+ "futures-util",
  "log",
  "quinn-proto",
  "serde",

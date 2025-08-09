@@ -2,8 +2,8 @@ use std::{net::SocketAddr, path::Path, sync::Arc};
 
 use compio::{
     net::UdpSocket,
-    quic::{self, ClientBuilder, Connection, Endpoint, Incoming, ServerBuilder},
-    rustls::{self},
+    quic::{self, ClientBuilder, Connection, Endpoint, ServerBuilder},
+    rustls,
 };
 
 use super::Config;
@@ -34,7 +34,7 @@ impl<'a> QuicBuilder<'a> {
             san,
         })
     }
-    pub async fn build(self) -> Result<Quic, Box<dyn std::error::Error>> {
+    pub async fn build(self) -> Result<(QuicServer, QuicClient), Box<dyn std::error::Error>> {
         use rustls::{
             ClientConfig as TlsClientConfig, RootCertStore, ServerConfig as TlsServerConfig,
             pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject},
@@ -78,12 +78,14 @@ impl<'a> QuicBuilder<'a> {
 
         let san = self.san.to_string();
 
-        Ok(Quic {
-            client,
-            server,
-            peer,
-            san,
-        })
+        Ok((
+            QuicServer(server),
+            QuicClient {
+                end: client,
+                peer,
+                san,
+            },
+        ))
     }
 }
 
@@ -94,9 +96,24 @@ pub struct Quic {
     san: String,
 }
 
-pub struct QuicConnection {
-    client_side: Connection,
-    server_side: Endpoint,
+pub struct QuicServer(Endpoint);
+
+impl QuicServer {
+    pub async fn wait_incoming(&self) -> Option<quic::Incoming> {
+        self.0.wait_incoming().await
+    }
+}
+
+impl QuicClient {
+    pub async fn connect(&self) -> Result<Connection, Box<dyn std::error::Error>> {
+        Ok(self.end.connect(self.peer, &self.san, None)?.await?)
+    }
+}
+
+pub struct QuicClient {
+    end: Endpoint,
+    peer: SocketAddr,
+    san: String,
 }
 
 #[cfg(test)]
@@ -104,10 +121,8 @@ mod tests {
     use crate::tests_common::*;
 
     #[compio::test]
-    async fn send_to_server() {
-        let quic = default_quic().await;
-        let client = quic.client;
-        let server = quic.server;
+    async fn send_to_and_recv_from_server() {
+        let (server, client) = default_quic().await;
         let task = compio::runtime::spawn(async move {
             let incoming = server.wait_incoming().await.unwrap();
             let conn = incoming.accept().unwrap().await.unwrap();
@@ -117,11 +132,7 @@ mod tests {
                 .unwrap();
             compio::time::sleep(std::time::Duration::from_millis(100)).await;
         });
-        let conn = client
-            .connect(quic.peer, &quic.san, None)
-            .unwrap()
-            .await
-            .unwrap();
+        let conn = client.connect().await.unwrap();
         conn.send_datagram(Bytes::from([0x01u8, 0x02].as_slice()))
             .unwrap();
         let buf = conn.recv_datagram().await.unwrap();

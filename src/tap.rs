@@ -1,9 +1,6 @@
 use compio::{
     BufResult,
-    buf::{
-        IntoInner,
-        bytes::{Bytes, BytesMut},
-    },
+    buf::bytes::{Bytes, BytesMut},
     fs::AsyncFd,
     io::{AsyncRead, AsyncWrite},
 };
@@ -17,11 +14,7 @@ pub struct TapBuilder {
     ipv6: Option<String>,
 }
 
-pub struct TapInterface {
-    inner: SyncDevice,
-}
-
-pub struct TapHandle {
+pub struct Tap {
     inner: AsyncFd<SyncDevice>,
 }
 
@@ -33,15 +26,15 @@ impl TapBuilder {
             ipv6: config.ipv6.clone(),
         }
     }
-    pub fn build(self) -> Result<TapInterface, Box<dyn std::error::Error>> {
-        let name = self.name;
-        let inner = DeviceBuilder::new().name(name);
+    pub fn build(self) -> Result<Tap, Box<dyn std::error::Error>> {
         if self.ipv4.is_none() && self.ipv6.is_none() {
             Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "at least one address must be specified",
             ))?
         }
+        let name = self.name;
+        let inner = DeviceBuilder::new().name(name);
         let dev = if let Some(ipv4) = self.ipv4 {
             let ipv4: Vec<&str> = ipv4.split('/').collect();
             inner.ipv4(
@@ -66,11 +59,12 @@ impl TapBuilder {
             .mtu(1400)
             .layer(tun_rs::Layer::L2)
             .build_sync()?;
-        Ok(TapInterface { inner })
+        let inner = AsyncFd::new(inner)?;
+        Ok(Tap { inner })
     }
 }
 
-impl TapInterface {
+impl Tap {
     pub fn name(&self) -> Result<String, Box<dyn std::error::Error>> {
         Ok(self.inner.name()?)
     }
@@ -83,37 +77,11 @@ impl TapInterface {
     pub fn set_mtu(&mut self, mtu: u16) -> Result<(), Box<dyn std::error::Error>> {
         Ok(self.inner.set_mtu(mtu)?)
     }
-}
-
-impl TryFrom<TapInterface> for TapHandle {
-    type Error = Box<dyn std::error::Error>;
-
-    fn try_from(tap: TapInterface) -> Result<Self, Self::Error> {
-        let inner = AsyncFd::new(tap.inner)?;
-        Ok(TapHandle { inner })
-    }
-}
-
-impl TapHandle {
     pub async fn recv(&mut self, buf: BytesMut) -> BufResult<usize, BytesMut> {
         self.inner.read(buf).await
     }
     pub async fn send(&mut self, buf: Bytes) -> BufResult<usize, Bytes> {
         self.inner.write(buf).await
-    }
-}
-
-impl TryFrom<TapHandle> for TapInterface {
-    type Error = Box<dyn std::error::Error>;
-
-    fn try_from(handle: TapHandle) -> Result<Self, Self::Error> {
-        let inner = handle.inner.into_inner().try_unwrap().map_err(|e| {
-            drop(e);
-            Box::new(std::io::Error::other(
-                "failed to unwrap TapHandle".to_string(),
-            ))
-        })?;
-        Ok(TapInterface { inner })
     }
 }
 
@@ -134,7 +102,7 @@ mod tests {
 
     #[compio::test]
     async fn send_to_and_recv_from_tap() {
-        let mut tap = TapHandle::try_from(default_tap()).unwrap();
+        let mut tap = default_tap();
         let mac = tap.inner.mac_address().unwrap();
         let peer_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
         // construct an arp request raw packet
