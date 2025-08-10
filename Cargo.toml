@@ -20,9 +20,9 @@ compio = { default-features = false, features = [
     "ring",
     "runtime",
     "rustls",
-    "signal",
     "time",
 ], version = "0.15" }
+dashmap = { default-features = false, version = "6" }
 env_logger = { default-features = true, version = "0.11" }
 futures-channel = { default-features = false, features = [
     "alloc",

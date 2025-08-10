@@ -89,24 +89,45 @@ impl<'a> QuicBuilder<'a> {
     }
 }
 
-pub struct Quic {
-    client: Endpoint,
-    server: Endpoint,
-    peer: SocketAddr,
-    san: String,
-}
-
 pub struct QuicServer(Endpoint);
 
 impl QuicServer {
-    pub async fn wait_incoming(&self) -> Option<quic::Incoming> {
-        self.0.wait_incoming().await
+    pub async fn listen(&self) -> Option<Connection> {
+        log::debug!("started listening for incoming connections");
+        if let Some(incoming) = self.0.wait_incoming().await {
+            log::debug!("received incoming connection attempt");
+            match incoming.accept() {
+                Ok(connecting) => {
+                    log::debug!("accepting incoming connection");
+                    match connecting.await {
+                        Ok(conn) => {
+                            log::info!("established incoming connection");
+                            Some(conn)
+                        }
+                        Err(e) => {
+                            log::error!("failed to establish incoming connection: {e}");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("failed to accept incoming connection: {e}");
+                    panic!("failed to accept connection: {e}");
+                }
+            }
+        } else {
+            None
+        }
     }
 }
 
 impl QuicClient {
     pub async fn connect(&self) -> Result<Connection, Box<dyn std::error::Error>> {
-        Ok(self.end.connect(self.peer, &self.san, None)?.await?)
+        log::debug!("attempting to connect to peer at {}", self.peer);
+        let connecting = self.end.connect(self.peer, &self.san, None)?;
+        let conn = connecting.await?;
+        log::info!("connected to peer at {}", self.peer);
+        Ok(conn)
     }
 }
 
@@ -123,20 +144,21 @@ mod tests {
     #[compio::test]
     async fn send_to_and_recv_from_server() {
         let (server, client) = default_quic().await;
-        let task = compio::runtime::spawn(async move {
-            let incoming = server.wait_incoming().await.unwrap();
-            let conn = incoming.accept().unwrap().await.unwrap();
-            let buf = conn.recv_datagram().await.unwrap();
-            assert_eq!(buf, Bytes::from([0x01u8, 0x02].as_slice()));
-            conn.send_datagram(Bytes::from([0x03u8, 0x04].as_slice()))
-                .unwrap();
-            compio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let server_task = compio::runtime::spawn(async move {
+            if let Some(conn) = server.listen().await {
+                let buf = conn.recv_datagram().await.unwrap();
+                assert_eq!(buf, Bytes::from([0x01u8, 0x02].as_slice()));
+                conn.send_datagram(Bytes::from([0x03u8, 0x04].as_slice()))
+                    .unwrap();
+                compio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
         });
+        compio::time::sleep(std::time::Duration::from_millis(100)).await;
         let conn = client.connect().await.unwrap();
         conn.send_datagram(Bytes::from([0x01u8, 0x02].as_slice()))
             .unwrap();
         let buf = conn.recv_datagram().await.unwrap();
         assert_eq!(buf, Bytes::from([0x03u8, 0x04].as_slice()));
-        task.await.unwrap();
+        server_task.await.unwrap();
     }
 }

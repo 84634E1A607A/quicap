@@ -13,6 +13,7 @@ pub struct Args {
 #[cfg_attr(test, derive(Debug, PartialEq))]
 #[derive(Deserialize)]
 pub struct Config {
+    #[serde(default = "default_name")]
     pub name: String,
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
@@ -28,6 +29,10 @@ pub struct Config {
     pub ca_crt: PathBuf,
     #[serde(default = "default_san")]
     pub san: String,
+}
+
+fn default_name() -> String {
+    "quicap0".into()
 }
 
 fn default_san() -> String {

@@ -1,13 +1,17 @@
 mod args;
+mod interface;
 mod quic;
+mod switch;
 mod tap;
-mod tunnel;
 
 use clap::Parser;
 use log::info;
 
 use self::{
     args::{Args, Config},
+    interface::QuicTunnel,
+    quic::{QuicBuilder, QuicClient, QuicServer},
+    switch::Switch,
     tap::{Tap, TapBuilder},
 };
 
@@ -17,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     #[cfg(debug_assertions)]
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
-    let (mut tap, (mut server, mut client)) = {
+    let (tap, (server, client)) = {
         let args = Args::parse();
         let config = std::path::Path::new(args.config.as_str());
         info!("reading from {config:?}");
@@ -25,10 +29,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let config: Config = toml::from_str(config.as_str())?;
         (
             TapBuilder::with_config(&config).build()?,
-            quic::QuicBuilder::with_config(&config)?.build().await?,
+            QuicBuilder::with_config(&config)?.build().await?,
         )
     };
     info!("created tap interface {}", tap.name()?);
+    let switch = Switch::from(tap, server, client);
     Ok(())
 }
 
